@@ -1,17 +1,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 #![allow(rustdoc::missing_crate_level_docs)] // it's an example
 
-use std::str::FromStr;
+use std::{fs::DirEntry, path::PathBuf, str::FromStr};
 
 use csv::ReaderBuilder as CSVReaderBuilder;
-use eframe::egui;
+use eframe::egui::{self, TextBuffer, Widget};
 
 fn main() -> eframe::Result {
-    let data_file = CSVFile::new(
-        String::from_str("sample_spectrum.csv").unwrap(),
+    let data_files = if let Some(data_file) = CSVFile::new(
+        PathBuf::from_str("sample_spectrum.csv").unwrap(),
         ',' as u8,
         '#' as u8,
-    );
+    ) {
+        vec![data_file]
+    } else {
+        Vec::new()
+    };
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -24,7 +28,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(|_cc| {
             Ok(Box::new(MyApp {
-                data_file,
+                // data_files,
                 ..Default::default()
             }))
         }),
@@ -32,38 +36,45 @@ fn main() -> eframe::Result {
 }
 
 impl CSVFile {
-    fn new(filepath: String, delimiter: u8, comment_char: u8) -> Option<Self> {
+    fn new(filepath: PathBuf, delimiter: u8, comment_char: u8) -> Option<Self> {
         let rdr = CSVReaderBuilder::new()
             .comment(Some(comment_char))
             .delimiter(delimiter)
             .from_path(filepath.clone());
 
-        let data = if let Ok(mut rdr) = rdr {
-            let mut data = Vec::<[f64; 2]>::new();
-            'record: for entry in rdr.records() {
-                if let Ok(entry) = entry {
-                    let mut point = [0.0, 0.0];
-                    for (i, pt) in entry.iter().enumerate() {
-                        if i > 1 {
-                            break;
+        let data = match rdr {
+            Ok(mut rdr) => {
+                let mut data = Vec::<[f64; 2]>::new();
+                'record: for entry in rdr.records() {
+                    if let Ok(entry) = entry {
+                        let mut point = [0.0, 0.0];
+                        for (i, pt) in entry.iter().enumerate() {
+                            if i > 1 {
+                                break;
+                            }
+                            if let Ok(num) = pt.parse::<f64>() {
+                                point[i] = num;
+                            } else {
+                                // skips rows with unreadable numbers
+                                continue 'record;
+                            }
                         }
-                        if let Ok(num) = pt.parse::<f64>() {
-                            point[i] = num;
-                        } else {
-                            // skips rows with unreadable numbers
-                            continue 'record;
-                        }
+                        data.push(point);
+                    } else {
+                        // skips unreadable rows
+                        continue;
                     }
-                    data.push(point);
-                } else {
-                    // skips unreadable rows
-                    continue;
                 }
+                data
             }
-            data
-        } else {
-            eprintln!("WARNING: Data from file {} could not be read!", filepath);
-            return None;
+            Err(err) => {
+                eprintln!(
+                    "WARNING: Data from file {} could not be read: {}",
+                    filepath.to_string_lossy(),
+                    err
+                );
+                return None;
+            }
         };
         Some(CSVFile {
             filepath,
@@ -76,16 +87,37 @@ impl CSVFile {
 
 #[derive(Default)]
 struct MyApp {
-    dropped_files: Vec<egui::DroppedFile>,
     picked_path: Option<String>,
-    data_file: Option<CSVFile>,
+    folders: Vec<Folder>,
 }
 
 struct CSVFile {
-    filepath: String,
+    filepath: PathBuf,
     data: Vec<[f64; 2]>,
     delimiter: u8,
     comment_char: u8,
+}
+
+impl Default for CSVFile {
+    fn default() -> Self {
+        Self {
+            filepath: "".into(),
+            data: vec![],
+            delimiter: ',' as u8,
+            comment_char: '#' as u8,
+        }
+    }
+}
+
+struct FileEntry {
+    filename: String,
+    data_file: CSVFile,
+    selected: bool,
+}
+
+struct Folder {
+    path: PathBuf,
+    files: Vec<FileEntry>,
 }
 
 impl eframe::App for MyApp {
@@ -93,10 +125,13 @@ impl eframe::App for MyApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.label("Drag-and-drop files onto the window!");
 
-            if ui.button("Open file…").clicked() {
-                if let Some(path) = rfd::FileDialog::new().pick_file() {
-                    self.picked_path = Some(path.display().to_string());
-                    self.data_file = CSVFile::new(path.display().to_string(), ',' as u8, '#' as u8);
+            if ui.button("Open folder…").clicked() {
+                for folder in rfd::FileDialog::new().pick_folders().unwrap_or_default() {
+                    let files = get_file_entries(&folder);
+                    self.folders.push(Folder {
+                        path: folder,
+                        files,
+                    })
                 }
             }
 
@@ -107,88 +142,68 @@ impl eframe::App for MyApp {
                 });
             }
 
-            // Show dropped files (if any):
-            if !self.dropped_files.is_empty() {
-                ui.group(|ui| {
-                    ui.label("Dropped files:");
-
-                    for file in &self.dropped_files {
-                        let mut info = if let Some(path) = &file.path {
-                            path.display().to_string()
-                        } else if !file.name.is_empty() {
-                            file.name.clone()
-                        } else {
-                            "???".to_owned()
+            for folder in self.folders.iter_mut() {
+                ui.label(folder.path.to_str().unwrap());
+                for file_entry in folder.files.iter_mut() {
+                    let label = if file_entry.selected {
+                        ui.label(&file_entry.filename).highlight()
+                    } else {
+                        ui.label(&file_entry.filename)
+                    };
+                    if label.clicked() {
+                        let filepath = {
+                            let path = folder.path.clone();
+                            path.join(file_entry.filename.clone())
                         };
-
-                        let mut additional_info = vec![];
-                        if !file.mime.is_empty() {
-                            additional_info.push(format!("type: {}", file.mime));
+                        if let Some(csvfile) = CSVFile::new(filepath, ',' as u8, '#' as u8) {
+                            file_entry.selected = !file_entry.selected;
+                            file_entry.data_file = csvfile
                         }
-                        if let Some(bytes) = &file.bytes {
-                            additional_info.push(format!("{} bytes", bytes.len()));
-                        }
-                        if !additional_info.is_empty() {
-                            info += &format!(" ({})", additional_info.join(", "));
-                        }
-
-                        ui.label(info);
-                    }
-                });
+                    };
+                }
             }
+
             egui_plot::Plot::new(1)
                 .min_size(egui::Vec2 { x: 640.0, y: 480.0 })
                 .show(ui, |plot_ui| {
-                    if let Some(data_file) = &self.data_file {
+                    for entry in self.folders.iter().flat_map(|folder| &folder.files) {
+                        if !entry.selected {
+                            continue;
+                        }
                         plot_ui.line(egui_plot::Line::new(egui_plot::PlotPoints::new(
-                            data_file.data.clone(),
+                            entry.data_file.data.clone(),
                         )))
                     }
                 });
         });
-
-        preview_files_being_dropped(ctx);
-
-        // Collect dropped files:
-        ctx.input(|i| {
-            if !i.raw.dropped_files.is_empty() {
-                self.dropped_files.clone_from(&i.raw.dropped_files);
-            }
-        });
     }
 }
 
-/// Preview hovering files:
-fn preview_files_being_dropped(ctx: &egui::Context) {
-    use egui::*;
-    use std::fmt::Write as _;
-
-    if !ctx.input(|i| i.raw.hovered_files.is_empty()) {
-        let text = ctx.input(|i| {
-            let mut text = "Dropping files:\n".to_owned();
-            for file in &i.raw.hovered_files {
-                if let Some(path) = &file.path {
-                    write!(text, "\n{}", path.display()).ok();
-                } else if !file.mime.is_empty() {
-                    write!(text, "\n{}", file.mime).ok();
-                } else {
-                    text += "\n???";
-                }
+fn get_file_entries(folder: &PathBuf) -> Vec<FileEntry> {
+    let mut file_entries = vec![];
+    match folder.read_dir() {
+        Ok(read_dir) => {
+            for entry in read_dir.into_iter() {
+                if let Ok(entry) = entry {
+                    // only list csv files
+                    let filename = entry.file_name().to_string_lossy().take();
+                    if !filename.ends_with(".csv") {
+                        continue;
+                    }
+                    let data_file = CSVFile {
+                        filepath: filename.clone().into(),
+                        ..Default::default()
+                    };
+                    let file_entry = FileEntry {
+                        filename,
+                        data_file,
+                        selected: false,
+                    };
+                    file_entries.push(file_entry)
+                };
             }
-            text
-        });
-
-        let painter =
-            ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("file_drop_target")));
-
-        let screen_rect = ctx.screen_rect();
-        painter.rect_filled(screen_rect, 0.0, Color32::from_black_alpha(192));
-        painter.text(
-            screen_rect.center(),
-            Align2::CENTER_CENTER,
-            text,
-            TextStyle::Heading.resolve(&ctx.style()),
-            Color32::WHITE,
-        );
+        }
+        Err(_) => (),
     }
+    file_entries
 }

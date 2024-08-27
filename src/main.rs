@@ -158,19 +158,31 @@ impl eframe::App for App {
                         })
                     }
                 }
+                self.list_folders(ui, ctx);
+                ui.horizontal(|ui| {
+                    if ui.button("Save Session").clicked() {
+                        self.save_state(None)
+                    }
+                    if ui.button("Load Session").clicked() {
+                        self.load_state(None);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Save Session As ...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_file_name("plotme_session.json")
+                            .save_file()
+                        {
+                            self.save_state(Some(path))
+                        }
+                    }
+                    if ui.button("Load Session From ...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_file() {
+                            self.load_state(Some(path))
+                        }
+                    }
+                })
             });
-
-        egui::panel::SidePanel::right("Session UI").show(ctx, |ui| {
-            self.list_folders(ui, ctx);
-            ui.horizontal(|ui| {
-                if ui.button("Save Session").clicked() {
-                    self.save_state(None)
-                }
-                if ui.button("Load Session").clicked() {
-                    self.load_state(None);
-                }
-            })
-        });
 
         egui::panel::CentralPanel::default().show(ctx, |ui| {
             // read input events

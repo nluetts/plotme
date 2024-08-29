@@ -1,11 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 #![allow(rustdoc::missing_crate_level_docs)] // it's an example
 
+use egui::menu::menu_button;
 use serde::{Deserialize, Serialize};
 use std::{
-    env::{join_paths, VarError},
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use csv::ReaderBuilder as CSVReaderBuilder;
@@ -26,6 +26,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(|_cc| {
             Ok(Box::new(App {
+                search_phrase: String::from(".csv"),
                 ..Default::default()
             }))
         }),
@@ -38,6 +39,7 @@ struct App {
     search_phrase: String,
     plot_xspan: f64,
     plot_yspan: f64,
+    yscale_speed: f64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -53,8 +55,8 @@ impl Default for CSVFile {
         Self {
             filepath: "".into(),
             data: vec![],
-            delimiter: ',' as u8,
-            comment_char: '#' as u8,
+            delimiter: b',',
+            comment_char: b'#',
         }
     }
 }
@@ -142,46 +144,15 @@ impl FloatInput {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::panel::TopBottomPanel::top("Menu").show(ctx, |ui| self.menu(ui));
+
         egui::panel::SidePanel::left("File Tree")
             .min_width(300.0)
             .show(ctx, |ui| {
                 let lab = ui.label("Filter:");
                 ui.text_edit_singleline(&mut self.search_phrase)
                     .labelled_by(lab.id);
-                if ui.button("Open folder…").clicked() {
-                    for folder in rfd::FileDialog::new().pick_folders().unwrap_or_default() {
-                        let files = get_file_entries(&folder);
-                        self.folders.push(Folder {
-                            path: folder,
-                            files,
-                            expanded: true,
-                        })
-                    }
-                }
                 self.list_folders(ui, ctx);
-                ui.horizontal(|ui| {
-                    if ui.button("Save Session").clicked() {
-                        self.save_state(None)
-                    }
-                    if ui.button("Load Session").clicked() {
-                        self.load_state(None);
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Save Session As ...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .set_file_name("plotme_session.json")
-                            .save_file()
-                        {
-                            self.save_state(Some(path))
-                        }
-                    }
-                    if ui.button("Load Session From ...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_file() {
-                            self.load_state(Some(path))
-                        }
-                    }
-                })
             });
 
         egui::panel::CentralPanel::default().show(ctx, |ui| {
@@ -204,7 +175,7 @@ impl eframe::App for App {
                         let scale = scale as f32;
                         // we just modify the string ... hacky
                         file_entry.scale.input =
-                            format!("{}", scale + mouse_delta.y.signum() * scale * 0.01);
+                            format!("{}", scale - mouse_delta.y.signum() * scale * 0.01);
                     }
                 }
             }
@@ -219,7 +190,7 @@ impl eframe::App for App {
                         // we just modify the string ... hacky
                         file_entry.offset.input = format!(
                             "{}",
-                            offset + mouse_delta.y.signum() * self.plot_yspan as f32 * 0.001
+                            offset - mouse_delta.y.signum() * self.plot_yspan as f32 * 0.001
                         );
                     }
                 }
@@ -273,7 +244,8 @@ impl eframe::App for App {
                             .map(|[x, y]| [*x + xoffset, *y * scale + offset])
                             .collect();
                         let line = egui_plot::Line::new(egui_plot::PlotPoints::new(input_data))
-                            .color(file_entry.color);
+                            .color(file_entry.color)
+                            .highlight(file_entry.active);
                         plot_ui.line(line);
                     }
                 });
@@ -305,19 +277,20 @@ impl App {
 
     fn load_state(&mut self, path: Option<PathBuf>) {
         // if no path is given, load from home directory
-        let path = if path.is_none() {
-            // load config from home
-            match default_config_path() {
-                Ok(path) => path,
-                Err(err) => {
-                    eprintln!("ERROR: could not find default config file path: {}", err);
-                    return;
+        let path = match path {
+            Some(path) => path,
+            None => {
+                // load config from home
+                match default_config_path() {
+                    Ok(path) => path,
+                    Err(err) => {
+                        eprintln!("ERROR: could not find default config file path: {}", err);
+                        return;
+                    }
                 }
             }
-        } else {
-            path.unwrap()
         };
-        fs::read_to_string(&path)
+        let _ = fs::read_to_string(&path)
             .and_then(|config_string| {
                 *self = serde_json::from_str::<App>(&config_string)?;
                 Ok(())
@@ -333,23 +306,92 @@ impl App {
     }
 
     fn save_state(&self, path: Option<PathBuf>) {
-        let path = if path.is_none() {
-            // write config file to home directory
-            match default_config_path() {
-                Ok(path) => path,
-                Err(err) => {
-                    eprintln!("ERROR: could not find default config file path: {}", err);
-                    return;
+        let path = match path {
+            Some(path) => path,
+            None => {
+                // write config to home directory
+                match default_config_path() {
+                    Ok(path) => path,
+                    Err(err) => {
+                        eprintln!("ERROR: could not find default config file path: {}", err);
+                        return;
+                    }
                 }
             }
-        } else {
-            path.unwrap()
         };
 
         let state = serde_json::to_string(&self).unwrap();
         if let Err(err) = fs::write(path, state) {
             eprintln!("ERROR: could not write config: {}", err);
         }
+    }
+
+    fn menu(&mut self, ui: &mut egui::Ui) -> egui::InnerResponse<()> {
+        egui::menu::bar(ui, |ui| {
+            if ui.button("Open Folder").clicked() {
+                for folder in rfd::FileDialog::new().pick_folders().unwrap_or_default() {
+                    let files = get_file_entries(&folder);
+                    self.folders.push(Folder {
+                        path: folder,
+                        files,
+                        expanded: true,
+                    })
+                }
+            }
+            menu_button(ui, "Session", |ui| {
+                if ui.button("Save Session").clicked() {
+                    self.save_state(None)
+                }
+                if ui.button("Load Session").clicked() {
+                    self.load_state(None);
+                }
+                if ui.button("Save Session As ...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_file_name("plotme_session.json")
+                        .save_file()
+                    {
+                        self.save_state(Some(path))
+                    }
+                }
+                if ui.button("Load Session From ...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().pick_file() {
+                        self.load_state(Some(path))
+                    }
+                }
+            });
+            menu_button(ui, "File Settings", |ui| {
+                for file_entry in self
+                    .folders
+                    .iter_mut()
+                    .flat_map(|folder| &mut folder.files)
+                    .filter(|file| file.is_plotted)
+                {
+                    ui.set_min_width(400.0);
+                    ui.menu_button(&file_entry.filename, |ui| {
+                        let lab = ui.label("Delimiter");
+                        let mut delimiter = ",";
+                        ui.text_edit_singleline(&mut delimiter).labelled_by(lab.id);
+                        let lab = ui.label("Comment character");
+                        let mut char = "#";
+                        ui.text_edit_singleline(&mut char).labelled_by(lab.id);
+                        let lab = ui.label("Scale");
+                        ui.text_edit_singleline(&mut file_entry.scale.input)
+                            .labelled_by(lab.id);
+                        let lab = ui.label("Offset");
+                        ui.text_edit_singleline(&mut file_entry.offset.input)
+                            .labelled_by(lab.id);
+                        egui::color_picker::color_picker_color32(
+                            ui,
+                            &mut file_entry.color,
+                            egui::color_picker::Alpha::BlendOrAdditive,
+                        );
+                        if ui.button("Close").clicked() {
+                            file_entry.expanded = false;
+                        }
+                    });
+                }
+            });
+        })
     }
 }
 
@@ -365,16 +407,7 @@ impl Folder {
             }
 
             // style file label, based on currently expanded or not
-            let file_label = {
-                let mut text = egui::RichText::new(&file_entry.filename).color(Color32::GRAY);
-                if file_entry.is_plotted {
-                    text = text.background_color(file_entry.color);
-                }
-                egui::Label::new(text)
-                    .truncate()
-                    .ui(ui)
-                    .on_hover_text_at_pointer(&file_entry.filename)
-            };
+            let file_label = get_file_label(file_entry).truncate().ui(ui);
 
             // toggle popup window with file settings
             if file_label.clicked() {
@@ -386,7 +419,7 @@ impl Folder {
                         let path = self.path.clone();
                         path.join(file_entry.filename.clone())
                     };
-                    if let Some(csvfile) = CSVFile::new(filepath, ',' as u8, '#' as u8) {
+                    if let Some(csvfile) = CSVFile::new(filepath, b',', b'#') {
                         // this makes it show the data on the first click
                         file_entry.is_plotted = true;
                         file_entry.data_file = csvfile;
@@ -394,9 +427,17 @@ impl Folder {
                 }
             };
 
-            // toggle plotted
+            // toggle plotted or active
             if file_label.secondary_clicked() {
-                file_entry.is_plotted = !file_entry.is_plotted;
+                if ctx.input(|i| i.modifiers.ctrl) {
+                    file_entry.active = !file_entry.active;
+                } else {
+                    file_entry.is_plotted = !file_entry.is_plotted;
+                    if !file_entry.is_plotted {
+                        // files which are not plotted cannot be active
+                        file_entry.active = false;
+                    }
+                }
             }
 
             if file_entry.expanded {
@@ -417,17 +458,6 @@ impl Folder {
                         let lab = ui.label("Offset");
                         ui.text_edit_singleline(&mut file_entry.offset.input)
                             .labelled_by(lab.id);
-                        ui.checkbox(&mut file_entry.active, "Modify in plot window");
-                        if file_entry.is_plotted {
-                            if ui.button("Remove from plot").clicked() {
-                                file_entry.is_plotted = false;
-                                file_entry.color = Color32::TRANSPARENT;
-                            }
-                        } else {
-                            if ui.button("Add to plot").clicked() {
-                                file_entry.is_plotted = true;
-                            }
-                        }
                         egui::color_picker::color_picker_color32(
                             ui,
                             &mut file_entry.color,
@@ -442,43 +472,51 @@ impl Folder {
     }
 }
 
-fn get_file_entries(folder: &PathBuf) -> Vec<FileEntry> {
+fn get_file_label(file_entry: &mut FileEntry) -> egui::Label {
+    let mut text = egui::RichText::new(&file_entry.filename);
+    if file_entry.is_plotted {
+        let mut textcolor = Color32::BLACK;
+        if file_entry.active {
+            textcolor = textcolor.gamma_multiply(0.5)
+        };
+        text = text.background_color(file_entry.color).color(textcolor);
+    }
+    if file_entry.active {
+        text = text.strong();
+    }
+    egui::Label::new(text)
+}
+
+fn get_file_entries(folder: &Path) -> Vec<FileEntry> {
     let mut file_entries = vec![];
-    match folder.read_dir() {
-        Ok(read_dir) => {
-            for entry in read_dir.into_iter() {
-                if let Ok(entry) = entry {
-                    // only list csv files
-                    let filename = entry.file_name().to_string_lossy().take();
-                    if !filename.ends_with(".csv") {
-                        continue;
-                    }
-                    let data_file = CSVFile {
-                        filepath: filename.clone().into(),
-                        ..Default::default()
-                    };
-                    let file_entry = FileEntry {
-                        filename,
-                        data_file,
-                        is_plotted: false,
-                        expanded: false,
-                        active: false,
-                        scale: FloatInput {
-                            input: "1.0".to_string(),
-                        },
-                        offset: FloatInput {
-                            input: "0.0".to_string(),
-                        },
-                        xoffset: FloatInput {
-                            input: "0.0".to_string(),
-                        },
-                        color: Color32::TRANSPARENT,
-                    };
-                    file_entries.push(file_entry)
-                };
-            }
+    if let Ok(read_dir) = folder.read_dir() {
+        // flatten pulls out the Ok variants of the `read_dir` elements
+        for entry in read_dir.into_iter().flatten() {
+            // only list csv files
+            let filename = entry.file_name().to_string_lossy().take();
+            let data_file = CSVFile {
+                filepath: filename.clone().into(),
+                ..Default::default()
+            };
+            let file_entry = FileEntry {
+                filename,
+                data_file,
+                is_plotted: false,
+                expanded: false,
+                active: false,
+                scale: FloatInput {
+                    input: "1.0".to_string(),
+                },
+                offset: FloatInput {
+                    input: "0.0".to_string(),
+                },
+                xoffset: FloatInput {
+                    input: "0.0".to_string(),
+                },
+                color: Color32::TRANSPARENT,
+            };
+            file_entries.push(file_entry)
         }
-        Err(_) => (),
     }
     file_entries
 }

@@ -116,7 +116,6 @@ struct FileEntry {
     filename: String,
     data_file: CSVFile,
     is_plotted: bool,
-    expanded: bool,
     scale: FloatInput,
     offset: FloatInput,
     xoffset: FloatInput,
@@ -367,7 +366,7 @@ impl App {
                     .filter(|file| file.is_plotted)
                 {
                     ui.set_min_width(400.0);
-                    ui.menu_button(&file_entry.filename, |ui| {
+                    ui.menu_button(file_entry.get_file_label_text(), |ui| {
                         let lab = ui.label("Delimiter");
                         let mut delimiter = ",";
                         ui.text_edit_singleline(&mut delimiter).labelled_by(lab.id);
@@ -385,9 +384,6 @@ impl App {
                             &mut file_entry.color,
                             egui::color_picker::Alpha::BlendOrAdditive,
                         );
-                        if ui.button("Close").clicked() {
-                            file_entry.expanded = false;
-                        }
                     });
                 }
             });
@@ -396,7 +392,7 @@ impl App {
 }
 
 impl Folder {
-    fn list_files_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, search_phrase: &str) {
+    fn list_files_ui(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context, search_phrase: &str) {
         for file_entry in self.files.iter_mut() {
             // exclude files which do not match search pattern
             if !search_phrase
@@ -406,12 +402,11 @@ impl Folder {
                 continue;
             }
 
-            // style file label, based on currently expanded or not
-            let file_label = get_file_label(file_entry).truncate().ui(ui);
+            // style file label, based on currently plotted/active or not
+            let file_label = file_entry.get_file_label().truncate().ui(ui);
 
             // toggle popup window with file settings
             if file_label.clicked() {
-                file_entry.expanded = !file_entry.expanded;
                 // lazily load the data
                 // TODO: if file was updated, it should be reloaded
                 if file_entry.data_file.data.is_empty() {
@@ -419,72 +414,48 @@ impl Folder {
                         let path = self.path.clone();
                         path.join(file_entry.filename.clone())
                     };
-                    if let Some(csvfile) = CSVFile::new(filepath, b',', b'#') {
+                    if let Some(csvfile) = CSVFile::new(
+                        filepath,
+                        file_entry.data_file.delimiter,
+                        file_entry.data_file.comment_char,
+                    ) {
                         // this makes it show the data on the first click
                         file_entry.is_plotted = true;
                         file_entry.data_file = csvfile;
                     }
+                } else {
+                    file_entry.is_plotted = !file_entry.is_plotted;
+                    file_entry.active = false ^ file_entry.is_plotted; // set active to false if not plotted
                 }
             };
 
             // toggle plotted or active
             if file_label.secondary_clicked() {
-                if ctx.input(|i| i.modifiers.ctrl) {
-                    file_entry.active = !file_entry.active;
-                } else {
-                    file_entry.is_plotted = !file_entry.is_plotted;
-                    if !file_entry.is_plotted {
-                        // files which are not plotted cannot be active
-                        file_entry.active = false;
-                    }
-                }
-            }
-
-            if file_entry.expanded {
-                egui::Window::new(&file_entry.filename)
-                    .default_width(300.0)
-                    .collapsible(false)
-                    .resizable(false)
-                    .show(ctx, |ui| {
-                        let lab = ui.label("Delimiter");
-                        let mut delimiter = ",";
-                        ui.text_edit_singleline(&mut delimiter).labelled_by(lab.id);
-                        let lab = ui.label("Comment character");
-                        let mut char = "#";
-                        ui.text_edit_singleline(&mut char).labelled_by(lab.id);
-                        let lab = ui.label("Scale");
-                        ui.text_edit_singleline(&mut file_entry.scale.input)
-                            .labelled_by(lab.id);
-                        let lab = ui.label("Offset");
-                        ui.text_edit_singleline(&mut file_entry.offset.input)
-                            .labelled_by(lab.id);
-                        egui::color_picker::color_picker_color32(
-                            ui,
-                            &mut file_entry.color,
-                            egui::color_picker::Alpha::BlendOrAdditive,
-                        );
-                        if ui.button("Close").clicked() {
-                            file_entry.expanded = false;
-                        }
-                    });
+                // only set file entry active if it is also plotted
+                file_entry.active = !file_entry.active && file_entry.is_plotted;
             }
         }
     }
 }
 
-fn get_file_label(file_entry: &mut FileEntry) -> egui::Label {
-    let mut text = egui::RichText::new(&file_entry.filename);
-    if file_entry.is_plotted {
-        let mut textcolor = Color32::BLACK;
-        if file_entry.active {
-            textcolor = textcolor.gamma_multiply(0.5)
-        };
-        text = text.background_color(file_entry.color).color(textcolor);
+impl FileEntry {
+    fn get_file_label_text(&mut self) -> egui::RichText {
+        let mut text = egui::RichText::new(&self.filename);
+        if self.is_plotted {
+            let mut textcolor = Color32::BLACK;
+            if self.active {
+                textcolor = textcolor.gamma_multiply(0.5)
+            };
+            text = text.background_color(self.color).color(textcolor);
+        }
+        if self.active {
+            text = text.strong();
+        }
+        text
     }
-    if file_entry.active {
-        text = text.strong();
+    fn get_file_label(&mut self) -> egui::Label {
+        egui::Label::new(self.get_file_label_text())
     }
-    egui::Label::new(text)
 }
 
 fn get_file_entries(folder: &Path) -> Vec<FileEntry> {
@@ -502,7 +473,6 @@ fn get_file_entries(folder: &Path) -> Vec<FileEntry> {
                 filename,
                 data_file,
                 is_plotted: false,
-                expanded: false,
                 active: false,
                 scale: FloatInput {
                     input: "1.0".to_string(),

@@ -22,7 +22,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "Native file dialogs and drag-and-drop files",
+        "PlotMe CSV File Plotter",
         options,
         Box::new(|_cc| {
             Ok(Box::new(App {
@@ -75,6 +75,7 @@ impl CSVFile {
                     if let Ok(entry) = entry {
                         let mut point = [0.0, 0.0];
                         for (i, pt) in entry.iter().enumerate() {
+                            // TODO: allow plotting other colums than just first and second
                             if i > 1 {
                                 break;
                             }
@@ -359,32 +360,16 @@ impl App {
                 }
             });
             menu_button(ui, "File Settings", |ui| {
-                for file_entry in self
-                    .folders
-                    .iter_mut()
-                    .flat_map(|folder| &mut folder.files)
-                    .filter(|file| file.is_plotted)
-                {
-                    ui.set_min_width(400.0);
-                    ui.menu_button(file_entry.get_file_label_text(), |ui| {
-                        let lab = ui.label("Delimiter");
-                        let mut delimiter = ",";
-                        ui.text_edit_singleline(&mut delimiter).labelled_by(lab.id);
-                        let lab = ui.label("Comment character");
-                        let mut char = "#";
-                        ui.text_edit_singleline(&mut char).labelled_by(lab.id);
-                        let lab = ui.label("Scale");
-                        ui.text_edit_singleline(&mut file_entry.scale.input)
-                            .labelled_by(lab.id);
-                        let lab = ui.label("Offset");
-                        ui.text_edit_singleline(&mut file_entry.offset.input)
-                            .labelled_by(lab.id);
-                        egui::color_picker::color_picker_color32(
-                            ui,
-                            &mut file_entry.color,
-                            egui::color_picker::Alpha::BlendOrAdditive,
-                        );
-                    });
+                ui.set_min_width(400.0);
+                for folder in self.folders.iter_mut() {
+                    for file_entry in folder.files.iter_mut() {
+                        if !file_entry.is_plotted {
+                            continue; // only list files that are plotted
+                        }
+                        ui.menu_button(file_entry.get_file_label_text(), |ui| {
+                            file_settings_menu(ui, file_entry, &folder.path);
+                        });
+                    }
                 }
             });
         })
@@ -419,7 +404,7 @@ impl Folder {
                         file_entry.data_file.delimiter,
                         file_entry.data_file.comment_char,
                     ) {
-                        // this makes it show the data on the first click
+                        // immediately plot freshly loaded csv
                         file_entry.is_plotted = true;
                         file_entry.data_file = csvfile;
                     }
@@ -455,6 +440,58 @@ impl FileEntry {
     }
     fn get_file_label(&mut self) -> egui::Label {
         egui::Label::new(self.get_file_label_text())
+    }
+    fn reload_csv(&mut self, folder_path: &Path) {
+        let filepath = { folder_path.join(self.filename.clone()) };
+        if let Some(csvfile) = CSVFile::new(
+            filepath,
+            self.data_file.delimiter,
+            self.data_file.comment_char,
+        ) {
+            // immediately plot freshly loaded csv
+            self.data_file = csvfile;
+        }
+    }
+}
+
+fn file_settings_menu(ui: &mut egui::Ui, file_entry: &mut FileEntry, folder_path: &Path) {
+    ui.heading("CSV Settings");
+    ui.horizontal(|ui| {
+        let lab = ui.label("Delimiter");
+        let mut delimiter =
+            String::from_utf8(vec![file_entry.data_file.delimiter]).unwrap_or("#".into());
+        ui.text_edit_singleline(&mut delimiter).labelled_by(lab.id);
+        if let Some(ch) = delimiter.as_bytes().first() {
+            file_entry.data_file.delimiter = *ch;
+        }
+        let lab = ui.label("Comment character");
+        let mut char =
+            String::from_utf8(vec![file_entry.data_file.comment_char]).unwrap_or("#".into());
+        ui.text_edit_singleline(&mut char).labelled_by(lab.id);
+        if let Some(ch) = char.as_bytes().first() {
+            file_entry.data_file.comment_char = *ch;
+        }
+    });
+
+    ui.heading("Manipulation");
+    ui.horizontal(|ui| {
+        let lab = ui.label("Scale");
+        ui.text_edit_singleline(&mut file_entry.scale.input)
+            .labelled_by(lab.id);
+        let lab = ui.label("Offset");
+        ui.text_edit_singleline(&mut file_entry.offset.input)
+            .labelled_by(lab.id);
+    });
+
+    ui.heading("Color");
+    egui::color_picker::color_picker_color32(
+        ui,
+        &mut file_entry.color,
+        egui::color_picker::Alpha::BlendOrAdditive,
+    );
+
+    if ui.button("Reload CSV").clicked() {
+        file_entry.reload_csv(folder_path);
     }
 }
 

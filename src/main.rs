@@ -1,5 +1,4 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
-#![allow(rustdoc::missing_crate_level_docs)] // it's an example
 
 use egui::menu::menu_button;
 use serde::{Deserialize, Serialize};
@@ -40,6 +39,8 @@ struct App {
     plot_xspan: f64,
     plot_yspan: f64,
     yscale_speed: f64,
+    #[serde(skip)]
+    errors: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -153,6 +154,13 @@ impl eframe::App for App {
                 ui.text_edit_singleline(&mut self.search_phrase)
                     .labelled_by(lab.id);
                 self.list_folders(ui, ctx);
+            });
+
+        egui::panel::TopBottomPanel::bottom("Error Log")
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.label("Error log:");
+                ui.label(&self.errors.join("\n"));
             });
 
         egui::panel::CentralPanel::default().show(ctx, |ui| {
@@ -372,7 +380,54 @@ impl App {
                     }
                 }
             });
+            menu_button(ui, "Save Plot", |ui| {
+                if ui.button("Save").clicked() {
+                    if let Err(msg) = self.save_svg() {
+                        self.errors.push(msg);
+                    };
+                }
+            });
         })
+    }
+
+    fn save_svg(&self) -> Result<(), String> {
+        use plotters::prelude::*;
+        let filepath = if let Some(path) = rfd::FileDialog::new().pick_file() {
+            path
+        } else {
+            return Err("ERROR: selected path unvalid.".to_string());
+        };
+        let root = SVGBackend::new(&filepath, (1024, 768)).into_drawing_area();
+        let font: FontDesc = ("sans-serif", 20.0).into();
+
+        err_to_string(root.fill(&WHITE), "ERROR: to prepare canvas for SVG export")?;
+
+        let chart = ChartBuilder::on(&root)
+            .margin(20u32)
+            .caption(format!("y=x^{}", 2), font)
+            .x_label_area_size(30u32)
+            .y_label_area_size(30u32)
+            .build_cartesian_2d(-1f32..1f32, -1.2f32..1.2f32);
+
+        let mut chart = err_to_string(chart, "ERROR: unable to build chart for SVG export")?;
+
+        err_to_string(
+            chart.configure_mesh().x_labels(3).y_labels(3).draw(),
+            "ERROR: unable to prepare labels for SVG export",
+        )?;
+
+        err_to_string(
+            chart.draw_series(LineSeries::new(
+                (-50..=50)
+                    .map(|x| x as f32 / 50.0)
+                    .map(|x| (x, x.powf(2 as f32))),
+                &RED,
+            )),
+            "ERROR: unable to draw data for SVG export",
+        )?;
+
+        err_to_string(root.present(), "ERROR: unable to write SVG output")?;
+        Ok(())
     }
 }
 
@@ -539,4 +594,11 @@ fn auto_color(color_idx: i32) -> Color32 {
 fn default_config_path() -> Result<PathBuf, std::env::VarError> {
     let home_path = std::env::var("HOME")?;
     Ok(PathBuf::from(home_path).join(".plotme.json"))
+}
+
+fn err_to_string<S, T>(result: Result<S, T>, base_message: &str) -> Result<S, String>
+where
+    T: std::fmt::Display,
+{
+    result.map_err(|err| format!("{}: {}", base_message, err))
 }

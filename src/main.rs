@@ -3,6 +3,7 @@
 use egui::menu::menu_button;
 use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Borrow,
     fs,
     path::{Path, PathBuf},
 };
@@ -36,11 +37,27 @@ fn main() -> eframe::Result {
 struct App {
     folders: Vec<Folder>,
     search_phrase: String,
-    plot_xspan: f64,
-    plot_yspan: f64,
-    yscale_speed: f64,
+    //FIXME: plot dimensions are not loaded when restoring session
+    plot_dims: PlotDimensions,
     #[serde(skip)]
     errors: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct PlotDimensions {
+    x0: f32,
+    x1: f32,
+    y0: f32,
+    y1: f32,
+}
+
+impl PlotDimensions {
+    fn xspan(&self) -> f32 {
+        (self.x1 - self.x0).abs()
+    }
+    fn yspan(&self) -> f32 {
+        (self.y1 - self.y0).abs()
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -198,7 +215,7 @@ impl eframe::App for App {
                         // we just modify the string ... hacky
                         file_entry.offset.input = format!(
                             "{}",
-                            offset - mouse_delta.y.signum() * self.plot_yspan as f32 * 0.001
+                            offset - mouse_delta.y.signum() * self.plot_dims.yspan() * 0.001
                         );
                     }
                 }
@@ -214,7 +231,7 @@ impl eframe::App for App {
                         // we just modify the string ... hacky
                         file_entry.xoffset.input = format!(
                             "{}",
-                            xoffset + mouse_delta.x.signum() * self.plot_xspan as f32 * 0.001
+                            xoffset + mouse_delta.x.signum() * self.plot_dims.xspan() * 0.001
                         );
                     }
                 }
@@ -223,8 +240,13 @@ impl eframe::App for App {
                 .min_size(egui::Vec2 { x: 640.0, y: 480.0 })
                 .allow_drag(!(f_down || d_down))
                 .show(ui, |plot_ui| {
-                    self.plot_xspan = plot_ui.plot_bounds().width();
-                    self.plot_yspan = plot_ui.plot_bounds().height();
+                    // update plot dimensions in App state
+                    let [x0, y0] = plot_ui.plot_bounds().min();
+                    let [x1, y1] = plot_ui.plot_bounds().max();
+                    self.plot_dims.x0 = x0 as f32;
+                    self.plot_dims.x1 = x1 as f32;
+                    self.plot_dims.y0 = y0 as f32;
+                    self.plot_dims.y1 = y1 as f32;
                     for file_entry in self.folders.iter_mut().flat_map(|folder| &mut folder.files) {
                         if !file_entry.is_plotted {
                             continue;
@@ -380,34 +402,35 @@ impl App {
                     }
                 }
             });
-            menu_button(ui, "Save Plot", |ui| {
-                if ui.button("Save").clicked() {
-                    if let Err(msg) = self.save_svg() {
-                        self.errors.push(msg);
-                    };
-                }
-            });
+            if ui.button("Save Plot").clicked() {
+                if let Err(msg) = self.save_svg() {
+                    self.errors.push(msg);
+                };
+            }
         })
     }
 
     fn save_svg(&self) -> Result<(), String> {
         use plotters::prelude::*;
-        let filepath = if let Some(path) = rfd::FileDialog::new().pick_file() {
+        let filepath = if let Some(path) = rfd::FileDialog::new().save_file() {
             path
         } else {
             return Err("ERROR: selected path unvalid.".to_string());
         };
         let root = SVGBackend::new(&filepath, (1024, 768)).into_drawing_area();
-        let font: FontDesc = ("sans-serif", 20.0).into();
+        // let font: FontDesc = ("sans-serif", 20.0).into();
 
         err_to_string(root.fill(&WHITE), "ERROR: to prepare canvas for SVG export")?;
 
         let chart = ChartBuilder::on(&root)
             .margin(20u32)
-            .caption(format!("y=x^{}", 2), font)
+            // .caption(format!("y=x^{}", 2), font)
             .x_label_area_size(30u32)
             .y_label_area_size(30u32)
-            .build_cartesian_2d(-1f32..1f32, -1.2f32..1.2f32);
+            .build_cartesian_2d(
+                self.plot_dims.x0..self.plot_dims.x1,
+                self.plot_dims.y0..self.plot_dims.y1,
+            );
 
         let mut chart = err_to_string(chart, "ERROR: unable to build chart for SVG export")?;
 
@@ -416,14 +439,41 @@ impl App {
             "ERROR: unable to prepare labels for SVG export",
         )?;
 
+        for file_entry in self.folders.iter().flat_map(|folder| &folder.files) {
+            if !file_entry.is_plotted || file_entry.color == Color32::TRANSPARENT {
+                continue;
+            }
+            let scale = file_entry.scale.parse().unwrap_or(1.0);
+            let offset = file_entry.offset.parse().unwrap_or(0.0);
+            let xoffset = file_entry.xoffset.parse().unwrap_or(0.0);
+            let color = {
+                let (r, g, b, a) = file_entry.color.to_tuple();
+                RGBAColor(r, g, b, a as f64 / 255.).stroke_width(2)
+            };
+            err_to_string(
+                chart.draw_series(LineSeries::new(
+                    file_entry
+                        .data_file
+                        .data
+                        .iter()
+                        .map(|[x, y]| (*x + xoffset, *y * scale + offset))
+                        .map(|(x, y)| (x as f32, y as f32)),
+                    color.clone(),
+                )),
+                "ERROR: unable to draw data for SVG export",
+            )?
+            .label(&file_entry.filename)
+            .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
+        }
+
         err_to_string(
-            chart.draw_series(LineSeries::new(
-                (-50..=50)
-                    .map(|x| x as f32 / 50.0)
-                    .map(|x| (x, x.powf(2 as f32))),
-                &RED,
-            )),
-            "ERROR: unable to draw data for SVG export",
+            chart
+                .configure_series_labels()
+                .background_style(&WHITE.mix(0.8))
+                .border_style(&BLACK)
+                .position(SeriesLabelPosition::UpperRight)
+                .draw(),
+            "ERROR: unable to configure labels for SVG export",
         )?;
 
         err_to_string(root.present(), "ERROR: unable to write SVG output")?;

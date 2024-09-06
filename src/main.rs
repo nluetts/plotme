@@ -3,7 +3,6 @@
 use egui::menu::menu_button;
 use serde::{Deserialize, Serialize};
 use std::{
-    borrow::Borrow,
     fs,
     path::{Path, PathBuf},
 };
@@ -60,7 +59,7 @@ impl PlotDimensions {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct CSVFile {
     filepath: PathBuf,
     data: Vec<[f64; 2]>,
@@ -130,26 +129,34 @@ impl CSVFile {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct FileEntry {
     filename: String,
     data_file: CSVFile,
-    is_plotted: bool,
     scale: FloatInput,
     offset: FloatInput,
     xoffset: FloatInput,
-    active: bool,
     color: Color32,
+    state: FileEntryState,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
+enum FileEntryState {
+    Idle,
+    Plotted,
+    PreviouslyPlotted,
+    Active,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 struct Folder {
     path: PathBuf,
     files: Vec<FileEntry>,
     expanded: bool,
+    to_be_deleted: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct FloatInput {
     input: String,
 }
@@ -168,14 +175,28 @@ impl eframe::App for App {
             .min_width(300.0)
             .show(ctx, |ui| {
                 let lab = ui.label("Filter:");
+                let prev_search_phrase = self.search_phrase.clone();
                 ui.text_edit_singleline(&mut self.search_phrase)
                     .labelled_by(lab.id);
+                // if search phrase has changed, release previously plotted file entries
+                // from being shown
+                if prev_search_phrase != self.search_phrase {
+                    for file_entry in self.folders.iter_mut().flat_map(|folder| &mut folder.files) {
+                        if file_entry.state == FileEntryState::PreviouslyPlotted {
+                            file_entry.state = FileEntryState::Idle
+                        }
+                    }
+                }
                 self.list_folders(ui, ctx);
             });
 
         egui::panel::TopBottomPanel::bottom("Error Log")
-            .resizable(true)
+            .exact_height(100.0)
             .show(ctx, |ui| {
+                // only retain the last 4 errors
+                if self.errors.len() > 4 {
+                    self.errors.drain(4..);
+                };
                 ui.label("Error log:");
                 ui.label(&self.errors.join("\n"));
             });
@@ -193,7 +214,7 @@ impl eframe::App for App {
             // scale active plots along y
             if !d_down && f_down && mouse_delta.y != 0.0 {
                 for file_entry in self.folders.iter_mut().flat_map(|folder| &mut folder.files) {
-                    if !file_entry.active {
+                    if file_entry.state != FileEntryState::Active {
                         continue;
                     }
                     if let Some(scale) = file_entry.scale.parse() {
@@ -207,7 +228,7 @@ impl eframe::App for App {
             // offset active plots along y
             if d_down && !f_down && mouse_delta.y != 0.0 {
                 for file_entry in self.folders.iter_mut().flat_map(|folder| &mut folder.files) {
-                    if !file_entry.active {
+                    if file_entry.state != FileEntryState::Active {
                         continue;
                     }
                     if let Some(offset) = file_entry.offset.parse() {
@@ -223,7 +244,7 @@ impl eframe::App for App {
             // offset active plots along x
             if g_down && mouse_delta.x != 0.0 {
                 for file_entry in self.folders.iter_mut().flat_map(|folder| &mut folder.files) {
-                    if !file_entry.active {
+                    if file_entry.state != FileEntryState::Active {
                         continue;
                     }
                     if let Some(xoffset) = file_entry.xoffset.parse() {
@@ -248,7 +269,7 @@ impl eframe::App for App {
                     self.plot_dims.y0 = y0 as f32;
                     self.plot_dims.y1 = y1 as f32;
                     for file_entry in self.folders.iter_mut().flat_map(|folder| &mut folder.files) {
-                        if !file_entry.is_plotted {
+                        if !file_entry.is_plotted() {
                             continue;
                         }
                         if file_entry.color == Color32::TRANSPARENT {
@@ -275,7 +296,7 @@ impl eframe::App for App {
                             .collect();
                         let line = egui_plot::Line::new(egui_plot::PlotPoints::new(input_data))
                             .color(file_entry.color)
-                            .highlight(file_entry.active);
+                            .highlight(file_entry.state == FileEntryState::Active);
                         plot_ui.line(line);
                     }
                 });
@@ -296,7 +317,10 @@ impl App {
             };
 
             if folder_label.clicked() {
-                folder.expanded = !folder.expanded
+                folder.expanded = !folder.expanded;
+                if ctx.input(|i| return i.modifiers.ctrl) {
+                    folder.to_be_deleted = true;
+                };
             }
 
             if folder.expanded {
@@ -305,34 +329,37 @@ impl App {
         }
     }
 
-    fn load_state(&mut self, path: Option<PathBuf>) {
+    fn delete_folders(&mut self) {
+        self.folders = self
+            .folders
+            .iter()
+            .filter_map(|f| match f.to_be_deleted {
+                true => None,
+                false => Some(f.to_owned()),
+            })
+            .collect();
+    }
+
+    fn load_state(&mut self, path: Option<PathBuf>) -> Result<(), String> {
         // if no path is given, load from home directory
         let path = match path {
             Some(path) => path,
             None => {
                 // load config from home
-                match default_config_path() {
-                    Ok(path) => path,
-                    Err(err) => {
-                        eprintln!("ERROR: could not find default config file path: {}", err);
-                        return;
-                    }
-                }
+                default_config_path()
+                    .err_to_string("ERROR: could not find default config file path")?
             }
         };
-        let _ = fs::read_to_string(&path)
-            .and_then(|config_string| {
-                *self = serde_json::from_str::<App>(&config_string)?;
-                Ok(())
-            })
-            .map_err(|err| {
-                eprintln!(
-                    "ERROR: could not read config file {}: {}",
-                    path.to_string_lossy(),
-                    err
-                );
-                err
-            });
+        let config_raw = fs::read_to_string(&path).err_to_string(&format!(
+            "Could not read contents of config file {}",
+            path.to_string_lossy()
+        ))?;
+        let state = serde_json::from_str::<App>(&config_raw).err_to_string(&format!(
+            "ERROR: could not read config file {}",
+            path.to_string_lossy(),
+        ))?;
+        *self = state;
+        Ok(())
     }
 
     fn save_state(&self, path: Option<PathBuf>) {
@@ -365,6 +392,7 @@ impl App {
                         path: folder,
                         files,
                         expanded: true,
+                        to_be_deleted: false,
                     })
                 }
             }
@@ -373,7 +401,9 @@ impl App {
                     self.save_state(None)
                 }
                 if ui.button("Load Session").clicked() {
-                    self.load_state(None);
+                    if let Err(msg) = self.load_state(None) {
+                        self.errors.push(msg);
+                    };
                 }
                 if ui.button("Save Session As ...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
@@ -381,25 +411,37 @@ impl App {
                         .save_file()
                     {
                         self.save_state(Some(path))
+                    } else {
+                        self.errors
+                            .push("WARNING: No path given to save the session.".to_string())
                     }
                 }
                 if ui.button("Load Session From ...").clicked() {
                     if let Some(path) = rfd::FileDialog::new().pick_file() {
-                        self.load_state(Some(path))
+                        if let Err(msg) = self.load_state(Some(path)) {
+                            self.errors.push(msg);
+                        }
                     }
                 }
             });
             menu_button(ui, "File Settings", |ui| {
                 ui.set_min_width(400.0);
+                let mut files_plotted = false;
                 for folder in self.folders.iter_mut() {
                     for file_entry in folder.files.iter_mut() {
-                        if !file_entry.is_plotted {
+                        if !file_entry.is_plotted() {
                             continue; // only list files that are plotted
                         }
                         ui.menu_button(file_entry.get_file_label_text(), |ui| {
                             file_settings_menu(ui, file_entry, &folder.path);
                         });
+                        if !files_plotted {
+                            files_plotted = true;
+                        }
                     }
+                }
+                if !files_plotted {
+                    ui.label("Settings for plotted files will appear here.");
                 }
             });
             if ui.button("Save Plot").clicked() {
@@ -420,9 +462,10 @@ impl App {
         let root = SVGBackend::new(&filepath, (1024, 768)).into_drawing_area();
         // let font: FontDesc = ("sans-serif", 20.0).into();
 
-        err_to_string(root.fill(&WHITE), "ERROR: to prepare canvas for SVG export")?;
+        root.fill(&WHITE)
+            .err_to_string("ERROR: to prepare canvas for SVG export")?;
 
-        let chart = ChartBuilder::on(&root)
+        let mut chart = ChartBuilder::on(&root)
             .margin(20u32)
             // .caption(format!("y=x^{}", 2), font)
             .x_label_area_size(30u32)
@@ -430,17 +473,18 @@ impl App {
             .build_cartesian_2d(
                 self.plot_dims.x0..self.plot_dims.x1,
                 self.plot_dims.y0..self.plot_dims.y1,
-            );
+            )
+            .err_to_string("ERROR: unable to build chart for SVG export")?;
 
-        let mut chart = err_to_string(chart, "ERROR: unable to build chart for SVG export")?;
-
-        err_to_string(
-            chart.configure_mesh().x_labels(3).y_labels(3).draw(),
-            "ERROR: unable to prepare labels for SVG export",
-        )?;
+        chart
+            .configure_mesh()
+            .x_labels(3)
+            .y_labels(3)
+            .draw()
+            .err_to_string("ERROR: unable to prepare labels for SVG export")?;
 
         for file_entry in self.folders.iter().flat_map(|folder| &folder.files) {
-            if !file_entry.is_plotted || file_entry.color == Color32::TRANSPARENT {
+            if !file_entry.is_plotted() || file_entry.color == Color32::TRANSPARENT {
                 continue;
             }
             let scale = file_entry.scale.parse().unwrap_or(1.0);
@@ -450,8 +494,9 @@ impl App {
                 let (r, g, b, a) = file_entry.color.to_tuple();
                 RGBAColor(r, g, b, a as f64 / 255.).stroke_width(2)
             };
-            err_to_string(
-                chart.draw_series(LineSeries::new(
+
+            chart
+                .draw_series(LineSeries::new(
                     file_entry
                         .data_file
                         .data
@@ -459,24 +504,22 @@ impl App {
                         .map(|[x, y]| (*x + xoffset, *y * scale + offset))
                         .map(|(x, y)| (x as f32, y as f32)),
                     color.clone(),
-                )),
-                "ERROR: unable to draw data for SVG export",
-            )?
-            .label(&file_entry.filename)
-            .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
+                ))
+                .err_to_string("ERROR: unable to draw data for SVG export")?
+                .label(&file_entry.filename)
+                .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
         }
 
-        err_to_string(
-            chart
-                .configure_series_labels()
-                .background_style(&WHITE.mix(0.8))
-                .border_style(&BLACK)
-                .position(SeriesLabelPosition::UpperRight)
-                .draw(),
-            "ERROR: unable to configure labels for SVG export",
-        )?;
+        chart
+            .configure_series_labels()
+            .background_style(&WHITE.mix(0.8))
+            .border_style(&BLACK)
+            .position(SeriesLabelPosition::UpperRight)
+            .draw()
+            .err_to_string("ERROR: unable to configure labels for SVG export")?;
 
-        err_to_string(root.present(), "ERROR: unable to write SVG output")?;
+        root.present()
+            .err_to_string("ERROR: unable to write SVG output")?;
         Ok(())
     }
 }
@@ -485,9 +528,11 @@ impl Folder {
     fn list_files_ui(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context, search_phrase: &str) {
         for file_entry in self.files.iter_mut() {
             // exclude files which do not match search pattern
-            if !search_phrase
+            if !(search_phrase
                 .split(" ")
                 .all(|phrase| file_entry.filename.contains(phrase))
+                || file_entry.is_plotted()
+                || file_entry.was_just_plotted())
             {
                 continue;
             }
@@ -510,19 +555,28 @@ impl Folder {
                         file_entry.data_file.comment_char,
                     ) {
                         // immediately plot freshly loaded csv
-                        file_entry.is_plotted = true;
+                        file_entry.state = FileEntryState::Plotted;
                         file_entry.data_file = csvfile;
                     }
                 } else {
-                    file_entry.is_plotted = !file_entry.is_plotted;
-                    file_entry.active = false ^ file_entry.is_plotted; // set active to false if not plotted
+                    match file_entry.state {
+                        FileEntryState::Active | FileEntryState::Plotted => {
+                            file_entry.state = FileEntryState::PreviouslyPlotted
+                        }
+                        FileEntryState::Idle | FileEntryState::PreviouslyPlotted => {
+                            file_entry.state = FileEntryState::Plotted
+                        }
+                    }
                 }
             };
 
             // toggle plotted or active
             if file_label.secondary_clicked() {
-                // only set file entry active if it is also plotted
-                file_entry.active = !file_entry.active && file_entry.is_plotted;
+                match file_entry.state {
+                    FileEntryState::Plotted => file_entry.state = FileEntryState::Active,
+                    FileEntryState::Active => file_entry.state = FileEntryState::Plotted,
+                    _ => (),
+                }
             }
         }
     }
@@ -531,14 +585,14 @@ impl Folder {
 impl FileEntry {
     fn get_file_label_text(&mut self) -> egui::RichText {
         let mut text = egui::RichText::new(&self.filename);
-        if self.is_plotted {
+        if self.is_plotted() {
             let mut textcolor = Color32::BLACK;
-            if self.active {
+            if self.is_active() {
                 textcolor = textcolor.gamma_multiply(0.5)
             };
             text = text.background_color(self.color).color(textcolor);
         }
-        if self.active {
+        if self.is_active() {
             text = text.strong();
         }
         text
@@ -556,6 +610,15 @@ impl FileEntry {
             // immediately plot freshly loaded csv
             self.data_file = csvfile;
         }
+    }
+    fn is_active(&self) -> bool {
+        self.state == FileEntryState::Active
+    }
+    fn is_plotted(&self) -> bool {
+        self.state == FileEntryState::Plotted || self.is_active()
+    }
+    fn was_just_plotted(&self) -> bool {
+        self.state == FileEntryState::PreviouslyPlotted
     }
 }
 
@@ -614,8 +677,7 @@ fn get_file_entries(folder: &Path) -> Vec<FileEntry> {
             let file_entry = FileEntry {
                 filename,
                 data_file,
-                is_plotted: false,
-                active: false,
+                state: FileEntryState::Idle,
                 scale: FloatInput {
                     input: "1.0".to_string(),
                 },
@@ -646,9 +708,13 @@ fn default_config_path() -> Result<PathBuf, std::env::VarError> {
     Ok(PathBuf::from(home_path).join(".plotme.json"))
 }
 
-fn err_to_string<S, T>(result: Result<S, T>, base_message: &str) -> Result<S, String>
-where
-    T: std::fmt::Display,
-{
-    result.map_err(|err| format!("{}: {}", base_message, err))
+// extending the Result type to convert error into strings
+trait ErrorStringExt<S> {
+    fn err_to_string(self, base_message: &str) -> Result<S, String>;
+}
+
+impl<T: std::fmt::Display + std::error::Error, S> ErrorStringExt<S> for Result<S, T> {
+    fn err_to_string(self, base_message: &str) -> Result<S, String> {
+        self.map_err(|err| format!("{}: {}", base_message, err))
+    }
 }

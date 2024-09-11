@@ -205,9 +205,9 @@ impl eframe::App for App {
             // read input events
             let (d_down, f_down, g_down, mouse_delta) = ctx.input(|i| {
                 (
-                    i.key_down(egui::Key::D),
-                    i.key_down(egui::Key::F),
-                    i.key_down(egui::Key::G),
+                    i.key_down(egui::Key::D), // pan y
+                    i.key_down(egui::Key::F), // scale y
+                    i.key_down(egui::Key::G), // pan x
                     i.pointer.delta(),
                 )
             });
@@ -218,10 +218,21 @@ impl eframe::App for App {
                         continue;
                     }
                     if let Some(scale) = file_entry.scale.parse() {
+                        let id = egui::Id::new("Acceleration F");
+                        let maybe_acceleration: Option<f32> = ctx.data(|dat| dat.get_temp(id));
+                        let acceleration = if let Some(acc) = maybe_acceleration {
+                            ctx.data_mut(|dat| dat.insert_temp(id, acc * 1.01));
+                            acc
+                        } else {
+                            ctx.data_mut(|dat| dat.insert_temp(id, 1.0));
+                            1.0
+                        };
                         let scale = scale as f32;
                         // we just modify the string ... hacky
-                        file_entry.scale.input =
-                            format!("{}", scale - mouse_delta.y.signum() * scale * 0.01);
+                        file_entry.scale.input = format!(
+                            "{}",
+                            scale - mouse_delta.y.signum() * scale * 0.01 * acceleration
+                        );
                     }
                 }
             }

@@ -40,6 +40,8 @@ struct App {
     plot_dims: PlotDimensions,
     #[serde(skip)]
     errors: Vec<String>,
+    #[serde(skip)]
+    acceleration: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -170,28 +172,6 @@ impl FloatInput {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::panel::TopBottomPanel::top("Menu").show(ctx, |ui| self.menu(ui));
-
-        egui::panel::SidePanel::left("File Tree")
-            .min_width(300.0)
-            .show(ctx, |ui| {
-                let lab = ui.label("Filter:");
-                let prev_search_phrase = self.search_phrase.clone();
-                ui.text_edit_singleline(&mut self.search_phrase)
-                    .labelled_by(lab.id);
-                // if search phrase has changed, release previously plotted file entries
-                // from being shown
-                if prev_search_phrase != self.search_phrase {
-                    for file_entry in self.folders.iter_mut().flat_map(|folder| &mut folder.files) {
-                        if file_entry.state == FileEntryState::PreviouslyPlotted {
-                            file_entry.state = FileEntryState::Idle
-                        }
-                    }
-                }
-                self.list_folders(ui, ctx);
-                // delete folders that were marked to be deleted
-                self.delete_folders();
-            });
-
         egui::panel::TopBottomPanel::bottom("Error Log")
             .exact_height(100.0)
             .show(ctx, |ui| {
@@ -206,10 +186,18 @@ impl eframe::App for App {
         egui::panel::CentralPanel::default().show(ctx, |ui| {
             // read input events
             let (d_down, f_down, g_down, mouse_delta) = ctx.input(|i| {
+                // set acceleration if mouse is pressed
+                if i.pointer.primary_pressed() {
+                    self.acceleration = Some(1.0)
+                };
+                // increase acceleration by x % per frame if mouse button is down
+                if i.pointer.primary_down() {
+                    self.acceleration = self.acceleration.map(|acc| acc * 1.03);
+                }
                 (
-                    i.key_down(egui::Key::D), // pan y
-                    i.key_down(egui::Key::F), // scale y
-                    i.key_down(egui::Key::G), // pan x
+                    i.key_down(egui::Key::D) && i.pointer.primary_down(), // pan y
+                    i.key_down(egui::Key::F) && i.pointer.primary_down(), // scale y
+                    i.key_down(egui::Key::G) && i.pointer.primary_down(), // pan x
                     i.pointer.delta(),
                 )
             });
@@ -220,15 +208,7 @@ impl eframe::App for App {
                         continue;
                     }
                     if let Some(scale) = file_entry.scale.parse() {
-                        let id = egui::Id::new("Acceleration F");
-                        let maybe_acceleration: Option<f32> = ctx.data(|dat| dat.get_temp(id));
-                        let acceleration = if let Some(acc) = maybe_acceleration {
-                            ctx.data_mut(|dat| dat.insert_temp(id, acc * 1.01));
-                            acc
-                        } else {
-                            ctx.data_mut(|dat| dat.insert_temp(id, 1.0));
-                            1.0
-                        };
+                        let acceleration = self.acceleration.unwrap_or(1.0) as f32;
                         let scale = scale as f32;
                         // we just modify the string ... hacky
                         file_entry.scale.input = format!(
@@ -245,11 +225,13 @@ impl eframe::App for App {
                         continue;
                     }
                     if let Some(offset) = file_entry.offset.parse() {
+                        let acceleration = self.acceleration.unwrap_or(1.0) as f32;
                         let offset = offset as f32;
+                        let span = self.plot_dims.yspan();
                         // we just modify the string ... hacky
                         file_entry.offset.input = format!(
                             "{}",
-                            offset - mouse_delta.y.signum() * self.plot_dims.yspan() * 0.001
+                            offset - mouse_delta.y.signum() * span * 0.001 * acceleration
                         );
                     }
                 }
@@ -261,18 +243,20 @@ impl eframe::App for App {
                         continue;
                     }
                     if let Some(xoffset) = file_entry.xoffset.parse() {
+                        let acceleration = self.acceleration.unwrap_or(1.0) as f32;
                         let xoffset = xoffset as f32;
+                        let span = self.plot_dims.xspan();
                         // we just modify the string ... hacky
                         file_entry.xoffset.input = format!(
                             "{}",
-                            xoffset + mouse_delta.x.signum() * self.plot_dims.xspan() * 0.001
+                            xoffset + mouse_delta.x.signum() * span * 0.001 * acceleration
                         );
                     }
                 }
             }
             egui_plot::Plot::new(1)
                 .min_size(egui::Vec2 { x: 640.0, y: 480.0 })
-                .allow_drag(!(f_down || d_down))
+                .allow_drag(!(f_down || d_down || g_down))
                 .show(ui, |plot_ui| {
                     // update plot dimensions in App state
                     let [x0, y0] = plot_ui.plot_bounds().min();
@@ -318,9 +302,12 @@ impl eframe::App for App {
 }
 
 impl App {
-    fn list_folders(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn list_folders(&mut self, ui: &mut egui::Ui) {
         for folder in self.folders.iter_mut() {
             ui.horizontal(|ui| {
+                if ui.small_button("x").clicked() {
+                    folder.to_be_deleted = true;
+                }
                 let folder_label = {
                     let text = egui::RichText::new(folder.path.to_str().unwrap());
                     if folder.expanded {
@@ -332,17 +319,10 @@ impl App {
 
                 if folder_label.clicked() {
                     folder.expanded = !folder.expanded;
-                    if ctx.input(|i| return i.modifiers.ctrl) {
-                        folder.to_be_deleted = true;
-                    };
-                }
-
-                if ui.small_button("x").clicked() {
-                    folder.to_be_deleted = true;
                 }
             });
             if folder.expanded {
-                folder.list_files_ui(ui, ctx, &self.search_phrase);
+                folder.list_files_ui(ui, &self.search_phrase);
             }
         }
     }
@@ -403,17 +383,12 @@ impl App {
 
     fn menu(&mut self, ui: &mut egui::Ui) -> egui::InnerResponse<()> {
         egui::menu::bar(ui, |ui| {
-            if ui.button("Open Folder").clicked() {
-                for folder in rfd::FileDialog::new().pick_folders().unwrap_or_default() {
-                    let files = get_file_entries(&folder);
-                    self.folders.push(Folder {
-                        path: folder,
-                        files,
-                        expanded: true,
-                        to_be_deleted: false,
-                    })
-                }
-            }
+            menu_button(ui, "Folder", |ui| {
+                egui::ScrollArea::vertical()
+                    // .max_height(f32::INFINITY)
+                    // .min_scrolled_height(400.0)
+                    .show(ui, |ui| self.file_tree_ui(ui));
+            });
             menu_button(ui, "Session", |ui| {
                 if ui.button("Save Session").clicked() {
                     self.save_state(None)
@@ -468,6 +443,42 @@ impl App {
                 };
             }
         })
+    }
+
+    fn file_tree_ui(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Open Folder").clicked() {
+            for folder in rfd::FileDialog::new().pick_folders().unwrap_or_default() {
+                let files = get_file_entries(&folder);
+                self.folders.push(Folder {
+                    path: folder,
+                    files,
+                    expanded: true,
+                    to_be_deleted: false,
+                })
+            }
+        }
+
+        if self.folders.is_empty() {
+            ui.label("Opened folders will appear here ...");
+            return;
+        }
+
+        let lab = ui.label("Filter:");
+        let prev_search_phrase = self.search_phrase.clone();
+        ui.text_edit_singleline(&mut self.search_phrase)
+            .labelled_by(lab.id);
+        // if search phrase has changed, release previously plotted file entries
+        // from being shown
+        if prev_search_phrase != self.search_phrase {
+            for file_entry in self.folders.iter_mut().flat_map(|folder| &mut folder.files) {
+                if file_entry.state == FileEntryState::PreviouslyPlotted {
+                    file_entry.state = FileEntryState::Idle
+                }
+            }
+        }
+        self.list_folders(ui);
+        // delete folders that were marked to be deleted
+        self.delete_folders();
     }
 
     fn save_svg(&self) -> Result<(), String> {
@@ -543,7 +554,7 @@ impl App {
 }
 
 impl Folder {
-    fn list_files_ui(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context, search_phrase: &str) {
+    fn list_files_ui(&mut self, ui: &mut egui::Ui, search_phrase: &str) {
         for file_entry in self.files.iter_mut() {
             // exclude files which do not match search pattern
             if !(search_phrase
@@ -660,14 +671,15 @@ fn file_settings_menu(ui: &mut egui::Ui, file_entry: &mut FileEntry, folder_path
     });
 
     ui.heading("Manipulation");
-    ui.horizontal(|ui| {
-        let lab = ui.label("Scale");
-        ui.text_edit_singleline(&mut file_entry.scale.input)
-            .labelled_by(lab.id);
-        let lab = ui.label("Offset");
-        ui.text_edit_singleline(&mut file_entry.offset.input)
-            .labelled_by(lab.id);
-    });
+    let lab = ui.label("Scale");
+    ui.text_edit_singleline(&mut file_entry.scale.input)
+        .labelled_by(lab.id);
+    let lab = ui.label("y-Offset");
+    ui.text_edit_singleline(&mut file_entry.offset.input)
+        .labelled_by(lab.id);
+    let lab = ui.label("x-Offset");
+    ui.text_edit_singleline(&mut file_entry.xoffset.input)
+        .labelled_by(lab.id);
 
     ui.heading("Color");
     egui::color_picker::color_picker_color32(

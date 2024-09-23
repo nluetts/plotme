@@ -188,6 +188,8 @@ impl eframe::App for App {
                     }
                 }
                 self.list_folders(ui, ctx);
+                // delete folders that were marked to be deleted
+                self.delete_folders();
             });
 
         egui::panel::TopBottomPanel::bottom("Error Log")
@@ -318,22 +320,27 @@ impl eframe::App for App {
 impl App {
     fn list_folders(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         for folder in self.folders.iter_mut() {
-            let folder_label = {
-                let text = egui::RichText::new(folder.path.to_str().unwrap());
-                if folder.expanded {
-                    ui.label(text.strong())
-                } else {
-                    ui.label(text.weak())
-                }
-            };
-
-            if folder_label.clicked() {
-                folder.expanded = !folder.expanded;
-                if ctx.input(|i| return i.modifiers.ctrl) {
-                    folder.to_be_deleted = true;
+            ui.horizontal(|ui| {
+                let folder_label = {
+                    let text = egui::RichText::new(folder.path.to_str().unwrap());
+                    if folder.expanded {
+                        ui.label(text.strong())
+                    } else {
+                        ui.label(text.weak())
+                    }
                 };
-            }
 
+                if folder_label.clicked() {
+                    folder.expanded = !folder.expanded;
+                    if ctx.input(|i| return i.modifiers.ctrl) {
+                        folder.to_be_deleted = true;
+                    };
+                }
+
+                if ui.small_button("x").clicked() {
+                    folder.to_be_deleted = true;
+                }
+            });
             if folder.expanded {
                 folder.list_files_ui(ui, ctx, &self.search_phrase);
             }

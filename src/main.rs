@@ -81,54 +81,71 @@ impl Default for CSVFile {
 }
 
 impl CSVFile {
-    fn new(filepath: PathBuf, delimiter: u8, comment_char: u8) -> Option<Self> {
+    fn new(
+        filepath: PathBuf,
+        xcol: usize,
+        ycol: usize,
+        delimiter: u8,
+        comment_char: u8,
+    ) -> Result<Self, String> {
         let rdr = CSVReaderBuilder::new()
             .comment(Some(comment_char))
             .delimiter(delimiter)
-            .from_path(filepath.clone());
+            .from_path(filepath.clone())
+            .map_err(|err| format!("ERROR: could not read CSV file {filepath:?}: {}", err))?;
 
-        let data = match rdr {
-            Ok(mut rdr) => {
-                let mut data = Vec::<[f64; 2]>::new();
-                'record: for entry in rdr.records() {
-                    if let Ok(entry) = entry {
-                        let mut point = [0.0, 0.0];
-                        for (i, pt) in entry.iter().enumerate() {
-                            // TODO: allow plotting other colums than just first and second
-                            if i > 1 {
-                                break;
-                            }
-                            if let Ok(num) = pt.parse::<f64>() {
-                                point[i] = num;
-                            } else {
-                                // skips rows with unreadable numbers
-                                continue 'record;
-                            }
-                        }
-                        data.push(point);
-                    } else {
-                        // skips unreadable rows
-                        continue;
-                    }
-                }
-                data
-            }
-            Err(err) => {
-                eprintln!(
-                    "WARNING: Data from file {} could not be read: {}",
-                    filepath.to_string_lossy(),
-                    err
-                );
-                return None;
-            }
-        };
-        Some(CSVFile {
+        let data = parse_rows(rdr, xcol, ycol, &filepath)?;
+        Ok(CSVFile {
             filepath,
             data,
             delimiter,
             comment_char,
         })
     }
+}
+
+fn parse_rows(
+    mut rdr: csv::Reader<fs::File>,
+    xcol: usize,
+    ycol: usize,
+    filepath: &Path,
+) -> Result<Vec<[f64; 2]>, String> {
+    let mut data = Vec::<[f64; 2]>::new();
+    for (i, entry) in rdr.records().enumerate() {
+        if let Ok(entry) = entry {
+            let x = entry.iter().nth(xcol);
+            let y = entry.iter().nth(ycol);
+            let [x, y] = match (x, y) {
+                (Some(x), Some(y)) => [x, y],
+                _ => {
+                    return Err(format!(
+                    "ERROR: columns {xcol}, {ycol} not available in entry {} for file {filepath:?}",
+                    i + 1
+                ))
+                }
+            };
+
+            let x: f64 = x.parse().map_err(|_| {
+                format!(
+                    "ERROR: could not parse x-value in entry {} for file {filepath:?}",
+                    i + 1
+                )
+            })?;
+            let y: f64 = y.parse().map_err(|_| {
+                format!(
+                    "ERROR: could not parse y-value in entry {} for file {filepath:?}",
+                    i + 1
+                )
+            })?;
+            data.push([x, y]);
+        } else {
+            return Err(format!(
+                "ERROR: could not parse row {} of file {filepath:?}",
+                i + 1
+            ));
+        }
+    }
+    Ok(data)
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -303,11 +320,9 @@ impl eframe::App for App {
 
 impl App {
     fn list_folders(&mut self, ui: &mut egui::Ui) {
+        let mut errors = vec![];
         for folder in self.folders.iter_mut() {
             ui.horizontal(|ui| {
-                if ui.small_button("x").clicked() {
-                    folder.to_be_deleted = true;
-                }
                 let folder_label = {
                     let text = egui::RichText::new(folder.path.to_str().unwrap());
                     if folder.expanded {
@@ -320,11 +335,16 @@ impl App {
                 if folder_label.clicked() {
                     folder.expanded = !folder.expanded;
                 }
+                if ui.small_button("x").clicked() {
+                    folder.to_be_deleted = true;
+                }
             });
             if folder.expanded {
-                folder.list_files_ui(ui, &self.search_phrase);
+                let file_errors = folder.list_files_ui(ui, &self.search_phrase);
+                errors.extend(file_errors);
             }
         }
+        self.errors.extend(errors);
     }
 
     fn delete_folders(&mut self) {
@@ -426,7 +446,9 @@ impl App {
                             continue; // only list files that are plotted
                         }
                         ui.menu_button(file_entry.get_file_label_text(), |ui| {
-                            file_settings_menu(ui, file_entry, &folder.path);
+                            if let Err(err) = file_settings_menu(ui, file_entry, &folder.path) {
+                                self.errors.push(err);
+                            };
                         });
                         if !files_plotted {
                             files_plotted = true;
@@ -554,7 +576,8 @@ impl App {
 }
 
 impl Folder {
-    fn list_files_ui(&mut self, ui: &mut egui::Ui, search_phrase: &str) {
+    fn list_files_ui(&mut self, ui: &mut egui::Ui, search_phrase: &str) -> Vec<String> {
+        let mut errors = vec![];
         for file_entry in self.files.iter_mut() {
             // exclude files which do not match search pattern
             if !(search_phrase
@@ -578,14 +601,20 @@ impl Folder {
                         let path = self.path.clone();
                         path.join(file_entry.filename.clone())
                     };
-                    if let Some(csvfile) = CSVFile::new(
+                    match CSVFile::new(
                         filepath,
+                        0,
+                        1,
                         file_entry.data_file.delimiter,
                         file_entry.data_file.comment_char,
                     ) {
-                        // immediately plot freshly loaded csv
-                        file_entry.state = FileEntryState::Plotted;
-                        file_entry.data_file = csvfile;
+                        Ok(csvfile) => {
+                            dbg!(&csvfile.filepath);
+                            // immediately plot freshly loaded csv
+                            file_entry.state = FileEntryState::Plotted;
+                            file_entry.data_file = csvfile;
+                        }
+                        Err(err) => errors.push(err),
                     }
                 } else {
                     match file_entry.state {
@@ -608,6 +637,7 @@ impl Folder {
                 }
             }
         }
+        return errors;
     }
 }
 
@@ -629,16 +659,16 @@ impl FileEntry {
     fn get_file_label(&mut self) -> egui::Label {
         egui::Label::new(self.get_file_label_text())
     }
-    fn reload_csv(&mut self, folder_path: &Path) {
+    fn reload_csv(&mut self, folder_path: &Path) -> Result<(), String> {
         let filepath = { folder_path.join(self.filename.clone()) };
-        if let Some(csvfile) = CSVFile::new(
+        self.data_file = CSVFile::new(
             filepath,
+            0,
+            1,
             self.data_file.delimiter,
             self.data_file.comment_char,
-        ) {
-            // immediately plot freshly loaded csv
-            self.data_file = csvfile;
-        }
+        )?;
+        Ok(())
     }
     fn is_active(&self) -> bool {
         self.state == FileEntryState::Active
@@ -651,7 +681,11 @@ impl FileEntry {
     }
 }
 
-fn file_settings_menu(ui: &mut egui::Ui, file_entry: &mut FileEntry, folder_path: &Path) {
+fn file_settings_menu(
+    ui: &mut egui::Ui,
+    file_entry: &mut FileEntry,
+    folder_path: &Path,
+) -> Result<(), String> {
     ui.heading("CSV Settings");
     ui.horizontal(|ui| {
         let lab = ui.label("Delimiter");
@@ -689,7 +723,9 @@ fn file_settings_menu(ui: &mut egui::Ui, file_entry: &mut FileEntry, folder_path
     );
 
     if ui.button("Reload CSV").clicked() {
-        file_entry.reload_csv(folder_path);
+        return file_entry.reload_csv(folder_path);
+    } else {
+        return Ok(());
     }
 }
 

@@ -42,6 +42,8 @@ struct App {
     errors: Vec<String>,
     #[serde(skip)]
     acceleration: Option<f64>,
+    #[serde(skip)]
+    copied_csvoptions: Option<CSVFile>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -67,6 +69,10 @@ struct CSVFile {
     data: Vec<[f64; 2]>,
     delimiter: u8,
     comment_char: u8,
+    xcol: usize,
+    ycol: usize,
+    skip_header: usize,
+    skip_footer: usize,
 }
 
 impl Default for CSVFile {
@@ -76,6 +82,10 @@ impl Default for CSVFile {
             data: vec![],
             delimiter: b',',
             comment_char: b'#',
+            xcol: 1,
+            ycol: 2,
+            skip_header: 0,
+            skip_footer: 0,
         }
     }
 }
@@ -87,19 +97,39 @@ impl CSVFile {
         ycol: usize,
         delimiter: u8,
         comment_char: u8,
-    ) -> Result<Self, String> {
+        skip_header: usize,
+        skip_footer: usize,
+        error_log: &mut Vec<String>,
+    ) -> Option<Self> {
         let rdr = CSVReaderBuilder::new()
             .comment(Some(comment_char))
             .delimiter(delimiter)
             .from_path(filepath.clone())
-            .map_err(|err| format!("ERROR: could not read CSV file {filepath:?}: {}", err))?;
+            .map_err(|err| {
+                error_log.push(format!(
+                    "ERROR: could not read CSV file {filepath:?}: {}",
+                    err
+                ))
+            });
+        if rdr.is_err() {
+            return None;
+        }
 
-        let data = parse_rows(rdr, xcol, ycol, &filepath)?;
-        Ok(CSVFile {
+        let rdr = rdr.unwrap();
+
+        let data = parse_rows(rdr, xcol, ycol, &filepath, error_log);
+        if data.is_empty() {
+            return None;
+        }
+        Some(CSVFile {
             filepath,
             data,
             delimiter,
             comment_char,
+            xcol,
+            ycol,
+            skip_header,
+            skip_footer,
         })
     }
 }
@@ -109,43 +139,51 @@ fn parse_rows(
     xcol: usize,
     ycol: usize,
     filepath: &Path,
-) -> Result<Vec<[f64; 2]>, String> {
+    error_log: &mut Vec<String>,
+) -> Vec<[f64; 2]> {
     let mut data = Vec::<[f64; 2]>::new();
     for (i, entry) in rdr.records().enumerate() {
-        if let Ok(entry) = entry {
-            let x = entry.iter().nth(xcol);
-            let y = entry.iter().nth(ycol);
-            let [x, y] = match (x, y) {
-                (Some(x), Some(y)) => [x, y],
-                _ => {
-                    return Err(format!(
-                    "ERROR: columns {xcol}, {ycol} not available in entry {} for file {filepath:?}",
-                    i + 1
-                ))
-                }
-            };
-
-            let x: f64 = x.parse().map_err(|_| {
-                format!(
-                    "ERROR: could not parse x-value in entry {} for file {filepath:?}",
-                    i + 1
-                )
-            })?;
-            let y: f64 = y.parse().map_err(|_| {
-                format!(
-                    "ERROR: could not parse y-value in entry {} for file {filepath:?}",
-                    i + 1
-                )
-            })?;
-            data.push([x, y]);
-        } else {
-            return Err(format!(
-                "ERROR: could not parse row {} of file {filepath:?}",
-                i + 1
+        if let Err(e) = entry {
+            error_log.push(format!(
+                "WARNING: could not parse row {} of file {filepath:?}: {}",
+                i + 1,
+                e
             ));
+            continue;
+        }
+        let entry = entry.unwrap();
+        let x = entry.iter().nth(xcol).map(|x| x.parse::<f64>());
+        let y = entry.iter().nth(ycol).map(|y| y.parse::<f64>());
+        match (x, y) {
+            (Some(Ok(x)), Some(Ok(y))) => {
+                data.push([x, y]);
+            }
+            (Some(Ok(_)), Some(Err(e))) => {
+                error_log.push(format!(
+                    "WARNING: y-column {ycol} could not be parsed in entry {} for file {filepath:?}: {}",
+                    i + 1,
+                    e
+                ));
+                continue;
+            }
+            (Some(Err(e)), Some(Ok(_))) => {
+                error_log.push(format!(
+                    "WARNING: x-column {xcol} could not be parsed in entry {} for file {filepath:?}: {}",
+                    i + 1,
+                    e
+                ));
+                continue;
+            }
+            _ => {
+                error_log.push(format!(
+                    "WARNING: could not parse columns {xcol}, {ycol} in entry {} for file {filepath:?}",
+                    i + 1
+                ));
+                continue;
+            }
         }
     }
-    Ok(data)
+    data
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -165,6 +203,7 @@ enum FileEntryState {
     Plotted,
     PreviouslyPlotted,
     Active,
+    NeedsConfig,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -192,12 +231,13 @@ impl eframe::App for App {
         egui::panel::TopBottomPanel::bottom("Error Log")
             .exact_height(100.0)
             .show(ctx, |ui| {
-                // only retain the last 4 errors
-                if self.errors.len() > 4 {
-                    self.errors.drain(4..);
+                // only retain the last 10 errors
+                if self.errors.len() > 10 {
+                    let n = self.errors.len().saturating_sub(10);
+                    self.errors = self.errors[n..].to_vec();
                 };
                 ui.label("Error log:");
-                ui.label(&self.errors.join("\n"));
+                ui.label(self.errors.join("\n"));
             });
 
         egui::panel::CentralPanel::default().show(ctx, |ui| {
@@ -320,9 +360,11 @@ impl eframe::App for App {
 
 impl App {
     fn list_folders(&mut self, ui: &mut egui::Ui) {
-        let mut errors = vec![];
         for folder in self.folders.iter_mut() {
             ui.horizontal(|ui| {
+                if ui.small_button("x").clicked() {
+                    folder.to_be_deleted = true;
+                }
                 let folder_label = {
                     let text = egui::RichText::new(folder.path.to_str().unwrap());
                     if folder.expanded {
@@ -335,16 +377,9 @@ impl App {
                 if folder_label.clicked() {
                     folder.expanded = !folder.expanded;
                 }
-                if ui.small_button("x").clicked() {
-                    folder.to_be_deleted = true;
-                }
             });
-            if folder.expanded {
-                let file_errors = folder.list_files_ui(ui, &self.search_phrase);
-                errors.extend(file_errors);
-            }
+            folder.list_files_ui(ui, &self.search_phrase, &mut self.errors);
         }
-        self.errors.extend(errors);
     }
 
     fn delete_folders(&mut self) {
@@ -405,8 +440,8 @@ impl App {
         egui::menu::bar(ui, |ui| {
             menu_button(ui, "Folder", |ui| {
                 egui::ScrollArea::vertical()
-                    // .max_height(f32::INFINITY)
-                    // .min_scrolled_height(400.0)
+                    .max_height(f32::INFINITY)
+                    .min_scrolled_height(800.0)
                     .show(ui, |ui| self.file_tree_ui(ui));
             });
             menu_button(ui, "Session", |ui| {
@@ -446,9 +481,13 @@ impl App {
                             continue; // only list files that are plotted
                         }
                         ui.menu_button(file_entry.get_file_label_text(), |ui| {
-                            if let Err(err) = file_settings_menu(ui, file_entry, &folder.path) {
-                                self.errors.push(err);
-                            };
+                            file_settings_menu(
+                                ui,
+                                file_entry,
+                                &folder.path,
+                                &mut self.copied_csvoptions,
+                                &mut self.errors,
+                            )
                         });
                         if !files_plotted {
                             files_plotted = true;
@@ -554,7 +593,7 @@ impl App {
                         .iter()
                         .map(|[x, y]| (*x + xoffset, *y * scale + offset))
                         .map(|(x, y)| (x as f32, y as f32)),
-                    color.clone(),
+                    color,
                 ))
                 .err_to_string("ERROR: unable to draw data for SVG export")?
                 .label(&file_entry.filename)
@@ -563,8 +602,8 @@ impl App {
 
         chart
             .configure_series_labels()
-            .background_style(&WHITE.mix(0.8))
-            .border_style(&BLACK)
+            .background_style(WHITE.mix(0.8))
+            .border_style(BLACK)
             .position(SeriesLabelPosition::UpperRight)
             .draw()
             .err_to_string("ERROR: unable to configure labels for SVG export")?;
@@ -576,15 +615,20 @@ impl App {
 }
 
 impl Folder {
-    fn list_files_ui(&mut self, ui: &mut egui::Ui, search_phrase: &str) -> Vec<String> {
-        let mut errors = vec![];
+    fn list_files_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        search_phrase: &str,
+        error_log: &mut Vec<String>,
+    ) {
         for file_entry in self.files.iter_mut() {
             // exclude files which do not match search pattern
             if !(search_phrase
                 .split(" ")
-                .all(|phrase| file_entry.filename.contains(phrase))
+                .all(|phrase| file_entry.filename.contains(phrase) && self.expanded)
+                // but list spectra that are or were just plotted
                 || file_entry.is_plotted()
-                || file_entry.was_just_plotted())
+                || (file_entry.was_just_plotted() && self.expanded))
             {
                 continue;
             }
@@ -592,38 +636,41 @@ impl Folder {
             // style file label, based on currently plotted/active or not
             let file_label = file_entry.get_file_label().truncate().ui(ui);
 
-            // toggle popup window with file settings
             if file_label.clicked() {
                 // lazily load the data
                 // TODO: if file was updated, it should be reloaded
-                if file_entry.data_file.data.is_empty() {
+                if file_entry.data_file.data.is_empty()
+                    && file_entry.state != FileEntryState::NeedsConfig
+                {
                     let filepath = {
                         let path = self.path.clone();
                         path.join(file_entry.filename.clone())
                     };
-                    match CSVFile::new(
+                    if let Some(csvfile) = CSVFile::new(
                         filepath,
-                        0,
-                        1,
+                        file_entry.data_file.xcol,
+                        file_entry.data_file.ycol,
                         file_entry.data_file.delimiter,
                         file_entry.data_file.comment_char,
+                        file_entry.data_file.skip_header,
+                        file_entry.data_file.skip_footer,
+                        error_log,
                     ) {
-                        Ok(csvfile) => {
-                            dbg!(&csvfile.filepath);
-                            // immediately plot freshly loaded csv
-                            file_entry.state = FileEntryState::Plotted;
-                            file_entry.data_file = csvfile;
-                        }
-                        Err(err) => errors.push(err),
+                        // immediately plot freshly loaded csv
+                        file_entry.state = FileEntryState::Plotted;
+                        file_entry.data_file = csvfile;
+                    } else {
+                        file_entry.state = FileEntryState::NeedsConfig;
                     }
                 } else {
-                    match file_entry.state {
+                    file_entry.state = match file_entry.state {
                         FileEntryState::Active | FileEntryState::Plotted => {
-                            file_entry.state = FileEntryState::PreviouslyPlotted
+                            FileEntryState::PreviouslyPlotted
                         }
                         FileEntryState::Idle | FileEntryState::PreviouslyPlotted => {
-                            file_entry.state = FileEntryState::Plotted
+                            FileEntryState::Plotted
                         }
+                        FileEntryState::NeedsConfig => FileEntryState::Idle,
                     }
                 }
             };
@@ -637,7 +684,6 @@ impl Folder {
                 }
             }
         }
-        return errors;
     }
 }
 
@@ -659,22 +705,28 @@ impl FileEntry {
     fn get_file_label(&mut self) -> egui::Label {
         egui::Label::new(self.get_file_label_text())
     }
-    fn reload_csv(&mut self, folder_path: &Path) -> Result<(), String> {
+    fn reload_csv(&mut self, folder_path: &Path, error_log: &mut Vec<String>) {
         let filepath = { folder_path.join(self.filename.clone()) };
-        self.data_file = CSVFile::new(
+        if let Some(csvfile) = CSVFile::new(
             filepath,
-            0,
-            1,
+            self.data_file.xcol,
+            self.data_file.ycol,
             self.data_file.delimiter,
             self.data_file.comment_char,
-        )?;
-        Ok(())
+            self.data_file.skip_header,
+            self.data_file.skip_footer,
+            error_log,
+        ) {
+            self.data_file = csvfile;
+        }
     }
     fn is_active(&self) -> bool {
         self.state == FileEntryState::Active
     }
     fn is_plotted(&self) -> bool {
-        self.state == FileEntryState::Plotted || self.is_active()
+        self.state == FileEntryState::Plotted
+            || self.state == FileEntryState::NeedsConfig
+            || self.is_active()
     }
     fn was_just_plotted(&self) -> bool {
         self.state == FileEntryState::PreviouslyPlotted
@@ -685,48 +737,85 @@ fn file_settings_menu(
     ui: &mut egui::Ui,
     file_entry: &mut FileEntry,
     folder_path: &Path,
-) -> Result<(), String> {
+    csv_options: &mut Option<CSVFile>,
+    error_log: &mut Vec<String>,
+) {
     ui.heading("CSV Settings");
+
+    ui.label("x-Column:");
+    integer_edit_field(ui, &mut file_entry.data_file.xcol);
+    ui.label("y-Column:");
+    integer_edit_field(ui, &mut file_entry.data_file.ycol);
+
+    ui.label("Skip header lines:");
+    integer_edit_field(ui, &mut file_entry.data_file.skip_header);
+    ui.label("Skip footer files:");
+    integer_edit_field(ui, &mut file_entry.data_file.skip_footer);
+
+    let lab = ui.label("Delimiter");
+    let mut delimiter =
+        String::from_utf8(vec![file_entry.data_file.delimiter]).unwrap_or("#".into());
+    ui.text_edit_singleline(&mut delimiter).labelled_by(lab.id);
+    if let Some(ch) = delimiter.as_bytes().first() {
+        file_entry.data_file.delimiter = *ch;
+    }
+    let lab = ui.label("Comment character");
+    let mut char = String::from_utf8(vec![file_entry.data_file.comment_char]).unwrap_or("#".into());
+    ui.text_edit_singleline(&mut char).labelled_by(lab.id);
+    if let Some(ch) = char.as_bytes().first() {
+        file_entry.data_file.comment_char = *ch;
+    }
+
     ui.horizontal(|ui| {
-        let lab = ui.label("Delimiter");
-        let mut delimiter =
-            String::from_utf8(vec![file_entry.data_file.delimiter]).unwrap_or("#".into());
-        ui.text_edit_singleline(&mut delimiter).labelled_by(lab.id);
-        if let Some(ch) = delimiter.as_bytes().first() {
-            file_entry.data_file.delimiter = *ch;
+        if ui.button("Copy Options").clicked() {
+            let csv_tempate = CSVFile {
+                delimiter: file_entry.data_file.delimiter,
+                comment_char: file_entry.data_file.comment_char,
+                xcol: file_entry.data_file.xcol,
+                ycol: file_entry.data_file.ycol,
+                skip_header: file_entry.data_file.skip_header,
+                skip_footer: file_entry.data_file.skip_footer,
+                ..Default::default()
+            };
+            *csv_options = Some(csv_tempate);
         }
-        let lab = ui.label("Comment character");
-        let mut char =
-            String::from_utf8(vec![file_entry.data_file.comment_char]).unwrap_or("#".into());
-        ui.text_edit_singleline(&mut char).labelled_by(lab.id);
-        if let Some(ch) = char.as_bytes().first() {
-            file_entry.data_file.comment_char = *ch;
+
+        match csv_options {
+            Some(opts) => {
+                if ui.button("Paste Options").clicked() {
+                    file_entry.data_file.delimiter = opts.delimiter;
+                    file_entry.data_file.comment_char = opts.comment_char;
+                    file_entry.data_file.xcol = opts.xcol;
+                    file_entry.data_file.ycol = opts.ycol;
+                    file_entry.data_file.skip_header = opts.skip_header;
+                    file_entry.data_file.skip_footer = opts.skip_footer;
+                }
+            }
+            None => {
+                ui.add_enabled(false, egui::Button::new("Paste Options"));
+            }
         }
     });
 
     ui.heading("Manipulation");
-    let lab = ui.label("Scale");
-    ui.text_edit_singleline(&mut file_entry.scale.input)
-        .labelled_by(lab.id);
-    let lab = ui.label("y-Offset");
-    ui.text_edit_singleline(&mut file_entry.offset.input)
-        .labelled_by(lab.id);
-    let lab = ui.label("x-Offset");
-    ui.text_edit_singleline(&mut file_entry.xoffset.input)
-        .labelled_by(lab.id);
-
-    ui.heading("Color");
-    egui::color_picker::color_picker_color32(
-        ui,
-        &mut file_entry.color,
-        egui::color_picker::Alpha::BlendOrAdditive,
-    );
+    ui.label("Scale");
+    ui.text_edit_singleline(&mut file_entry.scale.input);
+    ui.label("y-Offset");
+    ui.text_edit_singleline(&mut file_entry.offset.input);
+    ui.label("x-Offset");
+    ui.text_edit_singleline(&mut file_entry.xoffset.input);
 
     if ui.button("Reload CSV").clicked() {
-        return file_entry.reload_csv(folder_path);
-    } else {
-        return Ok(());
+        return file_entry.reload_csv(folder_path, error_log);
     }
+
+    ui.menu_button("Color", |ui| {
+        egui::color_picker::color_picker_color32(
+            ui,
+            &mut file_entry.color,
+            egui::color_picker::Alpha::BlendOrAdditive,
+        );
+    });
 }
 
 fn get_file_entries(folder: &Path) -> Vec<FileEntry> {
@@ -783,4 +872,13 @@ impl<T: std::fmt::Display + std::error::Error, S> ErrorStringExt<S> for Result<S
     fn err_to_string(self, base_message: &str) -> Result<S, String> {
         self.map_err(|err| format!("{}: {}", base_message, err))
     }
+}
+
+fn integer_edit_field(ui: &mut egui::Ui, value: &mut usize) -> egui::Response {
+    let mut tmp_value = format!("{}", value);
+    let res = ui.text_edit_singleline(&mut tmp_value);
+    if let Ok(result) = tmp_value.parse() {
+        *value = result;
+    }
+    res
 }

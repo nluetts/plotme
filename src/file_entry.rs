@@ -16,6 +16,7 @@ pub struct FileEntry {
     pub color: Color32,
     state: FileEntryState,
     pub id: usize,
+    pub preview: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -169,10 +170,34 @@ pub fn get_file_entries(folder: &Path, id_counter: &mut usize) -> Vec<FileEntry>
                 },
                 color: Color32::TRANSPARENT,
                 id: *id_counter,
+                preview: utils::read_first_lines(&entry.path(), 20).unwrap_or_default(),
             };
             *id_counter += 1;
             file_entries.push(file_entry)
         }
     }
     file_entries
+}
+
+mod utils {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    use std::path::Path;
+
+    pub(super) fn read_first_lines(
+        filepath: &Path,
+        num_lines: usize,
+    ) -> Result<String, std::io::Error> {
+        let file = File::open(filepath)?;
+        let buf_reader = BufReader::new(file);
+        let mut lines = String::new();
+
+        for line in buf_reader.lines().take(num_lines) {
+            if let Ok(line) = line {
+                lines.push_str(&line);
+            }
+        }
+
+        Ok(lines)
+    }
 }

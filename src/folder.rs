@@ -25,7 +25,13 @@ impl Folder {
                 continue;
             }
 
-            let file_label = file_entry.get_file_label().truncate().ui(ui);
+            let file_label = file_entry
+                .get_file_label()
+                .truncate()
+                .ui(ui)
+                .on_hover_ui(|ui| {
+                    ui.label(&file_entry.preview);
+                });
 
             if file_label.clicked() {
                 // lazily load the data

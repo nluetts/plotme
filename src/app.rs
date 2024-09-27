@@ -6,25 +6,29 @@ use std::{
 use crate::{
     csvfile::CSVFile,
     errors::ErrorStringExt,
-    file_entry::{get_file_entries, FileEntry, FileEntryState},
+    event::AppEvent,
+    file_entry::{get_file_entries, FileEntry},
     folder::Folder,
-    plot::{auto_color, PlotDimensions},
+    plot::PlotDimensions,
 };
-use egui::{menu::menu_button, Color32, Id};
+use egui::{menu::menu_button, Color32};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct App {
-    folders: Vec<Folder>,
+    pub folders: Vec<Folder>,
     search_phrase: String,
     //FIXME: plot dimensions are not loaded when restoring session
-    plot_dims: PlotDimensions,
+    pub plot_dims: PlotDimensions,
+    id_counter: usize,
     #[serde(skip)]
-    errors: Vec<String>,
+    pub errors: Vec<String>,
     #[serde(skip)]
-    acceleration: Option<f64>,
+    pub acceleration: Option<f64>,
     #[serde(skip)]
     copied_csvoptions: Option<CSVFile>,
+    #[serde(skip)]
+    queued_events: Vec<Box<dyn AppEvent>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -33,13 +37,19 @@ pub struct FloatInput {
 }
 
 impl FloatInput {
-    fn parse(&self) -> Option<f64> {
+    pub fn parse(&self) -> Option<f64> {
         self.input.parse().ok()
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // handle all events
+        let mut events = std::mem::take(&mut self.queued_events);
+        for mut event in events.drain(..) {
+            event.run(self);
+        }
+
         egui::panel::TopBottomPanel::top("Menu").show(ctx, |ui| self.menu(ui));
         egui::panel::TopBottomPanel::bottom("Error Log")
             .exact_height(100.0)
@@ -53,121 +63,7 @@ impl eframe::App for App {
                 ui.label(self.errors.join("\n"));
             });
 
-        egui::panel::CentralPanel::default().show(ctx, |ui| {
-            // read input events
-            let (d_down, f_down, g_down, mouse_delta) = ctx.input(|i| {
-                // set acceleration if mouse is pressed
-                if i.pointer.primary_pressed() {
-                    self.acceleration = Some(1.0)
-                };
-                // increase acceleration by x % per frame if mouse button is down
-                if i.pointer.primary_down() {
-                    self.acceleration = self.acceleration.map(|acc| acc * 1.03);
-                }
-                (
-                    i.key_down(egui::Key::D) && i.pointer.primary_down(), // pan y
-                    i.key_down(egui::Key::F) && i.pointer.primary_down(), // scale y
-                    i.key_down(egui::Key::G) && i.pointer.primary_down(), // pan x
-                    i.pointer.delta(),
-                )
-            });
-            // scale active plots along y
-            if !d_down && f_down && mouse_delta.y != 0.0 {
-                for file_entry in self.folders.iter_mut().flat_map(|folder| &mut folder.files) {
-                    if file_entry.state != FileEntryState::Active {
-                        continue;
-                    }
-                    if let Some(scale) = file_entry.scale.parse() {
-                        let acceleration = self.acceleration.unwrap_or(1.0) as f32;
-                        let scale = scale as f32;
-                        // we just modify the string ... hacky
-                        file_entry.scale.input = format!(
-                            "{}",
-                            scale - mouse_delta.y.signum() * scale * 0.01 * acceleration
-                        );
-                    }
-                }
-            }
-            // offset active plots along y
-            if d_down && !f_down && mouse_delta.y != 0.0 {
-                for file_entry in self.folders.iter_mut().flat_map(|folder| &mut folder.files) {
-                    if file_entry.state != FileEntryState::Active {
-                        continue;
-                    }
-                    if let Some(offset) = file_entry.offset.parse() {
-                        let acceleration = self.acceleration.unwrap_or(1.0) as f32;
-                        let offset = offset as f32;
-                        let span = self.plot_dims.yspan();
-                        // we just modify the string ... hacky
-                        file_entry.offset.input = format!(
-                            "{}",
-                            offset - mouse_delta.y.signum() * span * 0.001 * acceleration
-                        );
-                    }
-                }
-            }
-            // offset active plots along x
-            if g_down && mouse_delta.x != 0.0 {
-                for file_entry in self.folders.iter_mut().flat_map(|folder| &mut folder.files) {
-                    if file_entry.state != FileEntryState::Active {
-                        continue;
-                    }
-                    if let Some(xoffset) = file_entry.xoffset.parse() {
-                        let acceleration = self.acceleration.unwrap_or(1.0) as f32;
-                        let xoffset = xoffset as f32;
-                        let span = self.plot_dims.xspan();
-                        // we just modify the string ... hacky
-                        file_entry.xoffset.input = format!(
-                            "{}",
-                            xoffset + mouse_delta.x.signum() * span * 0.001 * acceleration
-                        );
-                    }
-                }
-            }
-            egui_plot::Plot::new(1)
-                .min_size(egui::Vec2 { x: 640.0, y: 480.0 })
-                .allow_drag(!(f_down || d_down || g_down))
-                .show(ui, |plot_ui| {
-                    // update plot dimensions in App state
-                    let [x0, y0] = plot_ui.plot_bounds().min();
-                    let [x1, y1] = plot_ui.plot_bounds().max();
-                    self.plot_dims.x0 = x0 as f32;
-                    self.plot_dims.x1 = x1 as f32;
-                    self.plot_dims.y0 = y0 as f32;
-                    self.plot_dims.y1 = y1 as f32;
-                    for file_entry in self.folders.iter_mut().flat_map(|folder| &mut folder.files) {
-                        if !file_entry.is_plotted() {
-                            continue;
-                        }
-                        if file_entry.color == Color32::TRANSPARENT {
-                            {
-                                // if no color was assigned to file yet, generate
-                                // it from the running color index
-                                let color_idx = ctx.data_mut(|map| {
-                                    let idx =
-                                        map.get_temp_mut_or_insert_with(Id::new("color_idx"), || 0);
-                                    *idx += 1;
-                                    *idx
-                                });
-                                file_entry.color = auto_color(color_idx);
-                            }
-                        }
-                        let scale = file_entry.scale.parse().unwrap_or(1.0);
-                        let offset = file_entry.offset.parse().unwrap_or(0.0);
-                        let xoffset = file_entry.xoffset.parse().unwrap_or(0.0);
-                        let input_data = file_entry
-                            .data_file
-                            .data
-                            .iter()
-                            .map(|[x, y]| [*x + xoffset, *y * scale + offset])
-                            .collect();
-                        let line = egui_plot::Line::new(egui_plot::PlotPoints::new(input_data))
-                            .color(file_entry.color)
-                            .highlight(file_entry.is_active());
-                        plot_ui.line(line);
-                    }
-                });
-        });
+        self.plot_panel_ui(ctx);
     }
 }
 
@@ -413,7 +309,7 @@ impl App {
     fn file_tree_ui(&mut self, ui: &mut egui::Ui) {
         if ui.button("Open Folder").clicked() {
             for folder in rfd::FileDialog::new().pick_folders().unwrap_or_default() {
-                let files = get_file_entries(&folder);
+                let files = get_file_entries(&folder, &mut self.id_counter);
                 self.folders.push(Folder {
                     path: folder,
                     files,
@@ -436,9 +332,7 @@ impl App {
         // from being shown
         if prev_search_phrase != self.search_phrase {
             for file_entry in self.folders.iter_mut().flat_map(|folder| &mut folder.files) {
-                if file_entry.state == FileEntryState::PreviouslyPlotted {
-                    file_entry.state = FileEntryState::Idle
-                }
+                file_entry.search_phrase_changed()
             }
         }
         self.list_folders(ui);
@@ -448,6 +342,7 @@ impl App {
 
     fn save_svg(&self) -> Result<(), String> {
         use plotters::prelude::*;
+
         let filepath = if let Some(path) = rfd::FileDialog::new().save_file() {
             path
         } else {

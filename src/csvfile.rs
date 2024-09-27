@@ -21,8 +21,8 @@ impl Default for CSVFile {
             data: vec![],
             delimiter: b',',
             comment_char: b'#',
-            xcol: 1,
-            ycol: 2,
+            xcol: 0,
+            ycol: 1,
             skip_header: 0,
             skip_footer: 0,
         }

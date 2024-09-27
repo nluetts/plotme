@@ -14,11 +14,12 @@ pub struct FileEntry {
     pub offset: FloatInput,
     pub xoffset: FloatInput,
     pub color: Color32,
-    pub state: FileEntryState,
+    state: FileEntryState,
+    pub id: usize,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
-pub enum FileEntryState {
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+enum FileEntryState {
     Idle,
     Plotted,
     PreviouslyPlotted,
@@ -26,20 +27,20 @@ pub enum FileEntryState {
     NeedsConfig,
 }
 
+impl FileEntryState {}
+
 impl FileEntry {
     pub fn get_file_label_text(&mut self) -> egui::RichText {
-        let mut text = egui::RichText::new(&self.filename);
-        if self.is_plotted() {
-            let mut textcolor = Color32::BLACK;
-            if self.is_active() {
-                textcolor = textcolor.gamma_multiply(0.5)
-            };
-            text = text.background_color(self.color).color(textcolor);
+        use FileEntryState::*;
+        let text = egui::RichText::new(&self.filename);
+        match self.state {
+            Idle | PreviouslyPlotted => text,
+            Plotted => text.color(Color32::BLACK).background_color(self.color),
+            Active => text
+                .color(Color32::BLACK.gamma_multiply(0.5))
+                .background_color(self.color),
+            NeedsConfig => text.color(Color32::RED),
         }
-        if self.is_active() {
-            text = text.strong();
-        }
-        text
     }
     pub fn get_file_label(&mut self) -> egui::Label {
         egui::Label::new(self.get_file_label_text())
@@ -59,20 +60,90 @@ impl FileEntry {
             self.data_file = csvfile;
         }
     }
+    pub fn should_be_listed(&self, search_phrase: &str, folder_is_expanded: bool) -> bool {
+        use FileEntryState::*;
+        let contains_search_phrase = search_phrase
+            .split(" ")
+            .all(|phrase| self.filename.contains(phrase));
+        match (contains_search_phrase, folder_is_expanded, &self.state) {
+            (true, true, _) => true,
+            (_, _, Idle) => false,
+            (_, _, Plotted | PreviouslyPlotted | Active | NeedsConfig) => true,
+        }
+    }
     pub fn is_active(&self) -> bool {
         self.state == FileEntryState::Active
     }
+    pub fn set_active(&mut self) {
+        self.state = FileEntryState::Active
+    }
     pub fn is_plotted(&self) -> bool {
-        self.state == FileEntryState::Plotted
-            || self.state == FileEntryState::NeedsConfig
-            || self.is_active()
+        use FileEntryState::*;
+        match self.state {
+            Plotted | Active | NeedsConfig => true,
+            Idle | PreviouslyPlotted => false,
+        }
     }
     pub fn was_just_plotted(&self) -> bool {
-        self.state == FileEntryState::PreviouslyPlotted
+        use FileEntryState::*;
+        match self.state {
+            Idle | Plotted | Active | NeedsConfig => true,
+            PreviouslyPlotted => true,
+        }
     }
 }
 
-pub fn get_file_entries(folder: &Path) -> Vec<FileEntry> {
+// transitions
+impl FileEntry {
+    pub fn clicked(&mut self, path: &Path, error_log: &mut Vec<String>) {
+        if self.data_file.data.is_empty() && self.state != FileEntryState::NeedsConfig {
+            let filepath = { path.join(self.filename.clone()) };
+            if let Some(csvfile) = CSVFile::new(
+                filepath,
+                self.data_file.xcol,
+                self.data_file.ycol,
+                self.data_file.delimiter,
+                self.data_file.comment_char,
+                self.data_file.skip_header,
+                self.data_file.skip_footer,
+                error_log,
+            ) {
+                // immediately plot freshly loaded csv
+                self.state = FileEntryState::Plotted;
+                self.data_file = csvfile;
+            } else {
+                self.state = FileEntryState::NeedsConfig;
+            }
+        } else {
+            self.state = match self.state {
+                FileEntryState::Active | FileEntryState::Plotted => {
+                    FileEntryState::PreviouslyPlotted
+                }
+                FileEntryState::Idle | FileEntryState::PreviouslyPlotted => FileEntryState::Plotted,
+                FileEntryState::NeedsConfig => FileEntryState::Idle,
+            }
+        }
+    }
+    pub fn secondary_clicked(&mut self) {
+        match self.state {
+            FileEntryState::Plotted => self.state = FileEntryState::Active,
+            FileEntryState::Active => self.state = FileEntryState::Plotted,
+            _ => (),
+        }
+    }
+    pub fn search_phrase_changed(&mut self) {
+        use FileEntryState::*;
+        self.state = match self.state {
+            PreviouslyPlotted => Idle,
+            Idle => Idle,
+            Plotted => Plotted,
+            Active => Active,
+            NeedsConfig => NeedsConfig,
+        }
+    }
+}
+
+pub fn get_file_entries(folder: &Path, id_counter: &mut usize) -> Vec<FileEntry> {
     let mut file_entries = vec![];
     if let Ok(read_dir) = folder.read_dir() {
         // flatten pulls out the Ok variants of the `read_dir` elements
@@ -97,7 +168,9 @@ pub fn get_file_entries(folder: &Path) -> Vec<FileEntry> {
                     input: "0.0".to_string(),
                 },
                 color: Color32::TRANSPARENT,
+                id: *id_counter,
             };
+            *id_counter += 1;
             file_entries.push(file_entry)
         }
     }

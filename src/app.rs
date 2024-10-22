@@ -158,8 +158,11 @@ impl App {
     fn list_folders(&mut self, ui: &mut egui::Ui) {
         for folder in self.folders.iter_mut() {
             ui.horizontal(|ui| {
-                if ui.small_button("x").clicked() {
+                if ui.small_button("🗙").clicked() {
                     folder.to_be_deleted = true;
+                }
+                if ui.small_button("⟳").clicked() {
+                    folder.refresh(&mut self.id_counter);
                 }
                 let folder_label = {
                     let text = egui::RichText::new(folder.path.to_str().unwrap());

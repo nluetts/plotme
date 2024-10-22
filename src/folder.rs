@@ -25,6 +25,7 @@ impl Folder {
                 *id_counter += 1;
             }
         }
+        files.sort_by(|a, b| a.filename.cmp(&b.filename));
         Self {
             path,
             files,
@@ -33,22 +34,47 @@ impl Folder {
         }
     }
     pub fn refresh(&mut self, id_counter: &mut usize) {
-        let mut new_files = vec![];
-        if let Ok(read_dir) = self.path.read_dir() {
-            // flatten pulls out the Ok variants of the `read_dir` elements
-            'outer: for entry in read_dir.into_iter().flatten() {
-                // only list csv files
-                let filename = entry.file_name().to_string_lossy().into_owned();
-                for f in self.files.iter() {
-                    if f.filename == filename {
-                        continue 'outer;
-                    }
+        let entries: Vec<_> = self
+            .path
+            .read_dir()
+            .iter_mut()
+            .flatten()
+            .flatten()
+            .collect();
+        if entries.is_empty() {
+            return;
+        }
+        let filenames: Vec<_> = entries
+            .iter()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        // filter out entries where the file does not appear in the folder anymore
+        // (was deleted between last and current loading of folder)
+        self.files = self
+            .files
+            .iter()
+            .filter_map(|e| {
+                if filenames.contains(&e.filename) {
+                    Some(e.to_owned())
+                } else {
+                    None
                 }
-                new_files.push(FileEntry::new(filename, id_counter, entry));
-                *id_counter += 1;
+            })
+            .collect();
+        let mut new_files = vec![];
+        'outer: for entry in entries {
+            // only list csv files
+            let filename = entry.file_name().to_string_lossy().into_owned();
+            for f in self.files.iter() {
+                if f.filename == filename {
+                    continue 'outer;
+                }
             }
+            new_files.push(FileEntry::new(filename, id_counter, entry));
+            *id_counter += 1;
         }
         self.files.append(&mut new_files);
+        self.files.sort_by(|a, b| a.filename.cmp(&b.filename));
     }
 
     pub fn list_files_ui(

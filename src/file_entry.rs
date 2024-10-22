@@ -31,6 +31,29 @@ pub enum FileEntryState {
 impl FileEntryState {}
 
 impl FileEntry {
+    pub fn new(filename: String, id_counter: &mut usize, entry: std::fs::DirEntry) -> Self {
+        let data_file = CSVFile {
+            filepath: filename.clone().into(),
+            ..Default::default()
+        };
+        Self {
+            filename,
+            data_file,
+            state: FileEntryState::Idle,
+            scale: FloatInput {
+                input: "1.0".to_string(),
+            },
+            offset: FloatInput {
+                input: "0.0".to_string(),
+            },
+            xoffset: FloatInput {
+                input: "0.0".to_string(),
+            },
+            color: egui::Color32::TRANSPARENT,
+            id: *id_counter,
+            preview: utils::read_first_lines(&entry.path(), 20).unwrap_or_default(),
+        }
+    }
     pub fn get_file_label_text(&mut self) -> egui::RichText {
         use FileEntryState::*;
         let text = egui::RichText::new(&self.filename);
@@ -141,5 +164,26 @@ impl FileEntry {
             Active => Active,
             NeedsConfig => NeedsConfig,
         }
+    }
+}
+
+mod utils {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    use std::path::Path;
+
+    pub(super) fn read_first_lines(
+        filepath: &Path,
+        num_lines: usize,
+    ) -> Result<String, std::io::Error> {
+        let file = File::open(filepath)?;
+        let buf_reader = BufReader::new(file);
+        let mut lines = String::new();
+
+        for line in buf_reader.lines().take(num_lines).flatten() {
+            lines.push_str(&line);
+        }
+
+        Ok(lines)
     }
 }

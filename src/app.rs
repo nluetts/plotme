@@ -4,12 +4,8 @@ use std::{
 };
 
 use crate::{
-    csvfile::CSVFile,
-    errors::ErrorStringExt,
-    event::AppEvent,
-    file_entry::{get_file_entries, FileEntry},
-    folder::Folder,
-    plot::PlotDimensions,
+    csvfile::CSVFile, errors::ErrorStringExt, event::AppEvent, file_entry::FileEntry,
+    folder::Folder, plot::PlotDimensions,
 };
 use egui::{menu::menu_button, Color32};
 use serde::{Deserialize, Serialize};
@@ -309,13 +305,7 @@ impl App {
     fn file_tree_ui(&mut self, ui: &mut egui::Ui) {
         if ui.button("Open Folder").clicked() {
             for folder in rfd::FileDialog::new().pick_folders().unwrap_or_default() {
-                let files = get_file_entries(&folder, &mut self.id_counter);
-                self.folders.push(Folder {
-                    path: folder,
-                    files,
-                    expanded: true,
-                    to_be_deleted: false,
-                })
+                self.folders.push(Folder::new(folder, &mut self.id_counter));
             }
         }
 

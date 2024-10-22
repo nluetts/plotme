@@ -14,13 +14,13 @@ pub struct FileEntry {
     pub offset: FloatInput,
     pub xoffset: FloatInput,
     pub color: Color32,
-    state: FileEntryState,
+    pub(crate) state: FileEntryState,
     pub id: usize,
     pub preview: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
-enum FileEntryState {
+pub enum FileEntryState {
     Idle,
     Plotted,
     PreviouslyPlotted,
@@ -141,63 +141,5 @@ impl FileEntry {
             Active => Active,
             NeedsConfig => NeedsConfig,
         }
-    }
-}
-
-pub fn get_file_entries(folder: &Path, id_counter: &mut usize) -> Vec<FileEntry> {
-    let mut file_entries = vec![];
-    if let Ok(read_dir) = folder.read_dir() {
-        // flatten pulls out the Ok variants of the `read_dir` elements
-        for entry in read_dir.into_iter().flatten() {
-            // only list csv files
-            let filename = entry.file_name().to_string_lossy().into_owned();
-            let data_file = CSVFile {
-                filepath: filename.clone().into(),
-                ..Default::default()
-            };
-            let file_entry = FileEntry {
-                filename,
-                data_file,
-                state: FileEntryState::Idle,
-                scale: FloatInput {
-                    input: "1.0".to_string(),
-                },
-                offset: FloatInput {
-                    input: "0.0".to_string(),
-                },
-                xoffset: FloatInput {
-                    input: "0.0".to_string(),
-                },
-                color: Color32::TRANSPARENT,
-                id: *id_counter,
-                preview: utils::read_first_lines(&entry.path(), 20).unwrap_or_default(),
-            };
-            *id_counter += 1;
-            file_entries.push(file_entry)
-        }
-    }
-    file_entries
-}
-
-mod utils {
-    use std::fs::File;
-    use std::io::{BufRead, BufReader};
-    use std::path::Path;
-
-    pub(super) fn read_first_lines(
-        filepath: &Path,
-        num_lines: usize,
-    ) -> Result<String, std::io::Error> {
-        let file = File::open(filepath)?;
-        let buf_reader = BufReader::new(file);
-        let mut lines = String::new();
-
-        for line in buf_reader.lines().take(num_lines) {
-            if let Ok(line) = line {
-                lines.push_str(&line);
-            }
-        }
-
-        Ok(lines)
     }
 }

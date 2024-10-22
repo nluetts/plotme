@@ -29,6 +29,6 @@ impl AppEvent for SetActive {
             }
         }
         let err_msg = format!("ERROR: file with id {} not found", self.file_id);
-        return vec![err_msg];
+        vec![err_msg]
     }
 }

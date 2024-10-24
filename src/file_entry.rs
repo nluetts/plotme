@@ -119,7 +119,7 @@ impl FileEntry {
 
 // transitions
 impl FileEntry {
-    pub fn clicked(&mut self, path: &Path, error_log: &mut Vec<String>) {
+    pub fn toggle_plotted(&mut self, path: &Path, error_log: &mut Vec<String>) {
         if self.data_file.data.is_empty() && self.state != FileEntryState::NeedsConfig {
             let filepath = { path.join(self.filename.clone()) };
             if let Some(csvfile) = CSVFile::new(
@@ -143,12 +143,15 @@ impl FileEntry {
                 FileEntryState::Active | FileEntryState::Plotted => {
                     FileEntryState::PreviouslyPlotted
                 }
-                FileEntryState::Idle | FileEntryState::PreviouslyPlotted => FileEntryState::Plotted,
+                FileEntryState::Idle | FileEntryState::PreviouslyPlotted => {
+                    self.reload_csv(path, error_log);
+                    FileEntryState::Plotted
+                }
                 FileEntryState::NeedsConfig => FileEntryState::Idle,
             }
         }
     }
-    pub fn secondary_clicked(&mut self) {
+    pub fn toggle_active(&mut self) {
         match self.state {
             FileEntryState::Plotted => self.state = FileEntryState::Active,
             FileEntryState::Active => self.state = FileEntryState::Plotted,

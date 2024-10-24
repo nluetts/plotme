@@ -24,7 +24,7 @@ pub struct App {
     #[serde(skip)]
     copied_csvoptions: Option<CSVFile>,
     #[serde(skip)]
-    queued_events: Vec<Box<dyn AppEvent>>,
+    pub queued_events: Vec<Box<dyn AppEvent>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -40,7 +40,7 @@ impl FloatInput {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // handle all events
+        // handle all events #TODO: system currently unused
         let mut events = std::mem::take(&mut self.queued_events);
         for mut event in events.drain(..) {
             event.run(self);
@@ -403,6 +403,23 @@ impl App {
         root.present()
             .err_to_string("ERROR: unable to write SVG output")?;
         Ok(())
+    }
+
+    pub fn iter_files_mut<'a>(
+        &'a mut self,
+    ) -> std::iter::FlatMap<
+        std::slice::IterMut<Folder>,
+        std::slice::IterMut<FileEntry>,
+        impl FnMut(&'a mut Folder) -> std::slice::IterMut<FileEntry>,
+    > {
+        self.folders
+            .iter_mut()
+            .flat_map(|f| f.files.iter_mut())
+            .into_iter()
+    }
+
+    pub fn queue_event(&mut self, event: Box<dyn crate::event::AppEvent>) {
+        self.queued_events.push(event);
     }
 }
 

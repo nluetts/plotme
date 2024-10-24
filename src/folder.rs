@@ -97,14 +97,12 @@ impl Folder {
                 });
 
             if file_label.clicked() {
-                // lazily load the data
-                // TODO: if file was updated, it should be reloaded
-                file_entry.clicked(&self.path, error_log);
+                file_entry.toggle_plotted(&self.path, error_log);
             };
 
             // toggle plotted or active
             if file_label.secondary_clicked() {
-                file_entry.secondary_clicked()
+                file_entry.toggle_active()
             }
         }
     }

@@ -23,79 +23,53 @@ impl PlotDimensions {
 impl App {
     pub fn plot_panel_ui(&mut self, ctx: &egui::Context) {
         egui::panel::CentralPanel::default().show(ctx, |ui| {
-            // read input events
-            let (d_down, f_down, g_down, mouse_delta) = ctx.input(|i| {
-                // set acceleration if mouse is pressed
-                if i.pointer.primary_pressed() {
-                    self.acceleration = Some(1.0)
-                };
-                // increase acceleration by x % per frame if mouse button is down
-                if i.pointer.primary_down() {
-                    self.acceleration = self.acceleration.map(|acc| acc * 1.03);
-                }
-                (
-                    i.key_down(egui::Key::D) && i.pointer.primary_down(), // pan y
-                    i.key_down(egui::Key::F) && i.pointer.primary_down(), // scale y
-                    i.key_down(egui::Key::G) && i.pointer.primary_down(), // pan x
-                    i.pointer.delta(),
-                )
+            let acc_id = Id::new("acceleration");
+            // dispatch mouse and keyboard interactions
+
+            // the current acceleration is stateful and must be kept between
+            // updates, thus we store it in the context and load it here
+            if ctx.input(|i| i.pointer.primary_released()) {
+                ctx.data_mut(|map| {
+                    map.remove_temp::<f64>(acc_id);
+                });
+            }
+            let acc = ctx.data_mut(|map| {
+                let acc = map.get_temp_mut_or_insert_with(acc_id, || 1.0);
+                *acc *= 1.01;
+                acc.to_owned()
             });
-            // scale active plots along y
-            if !d_down && f_down && mouse_delta.y != 0.0 {
-                for file_entry in self.folders.iter_mut().flat_map(|folder| &mut folder.files) {
-                    if !file_entry.is_active() {
-                        continue;
-                    }
-                    if let Some(scale) = file_entry.scale.parse() {
-                        let acceleration = self.acceleration.unwrap_or(1.0) as f32;
-                        let scale = scale as f32;
-                        // we just modify the string ... hacky
-                        file_entry.scale.input = format!(
-                            "{}",
-                            scale - mouse_delta.y.signum() * scale * 0.01 * acceleration
-                        );
-                    }
+            let allow_drag = ctx.input(|i| {
+                if !i.pointer.primary_down() {
+                    return true;
                 }
-            }
-            // offset active plots along y
-            if d_down && !f_down && mouse_delta.y != 0.0 {
-                for file_entry in self.folders.iter_mut().flat_map(|folder| &mut folder.files) {
-                    if file_entry.is_active() {
-                        continue;
-                    }
-                    if let Some(offset) = file_entry.offset.parse() {
-                        let acceleration = self.acceleration.unwrap_or(1.0) as f32;
-                        let offset = offset as f32;
-                        let span = self.plot_dims.yspan();
-                        // we just modify the string ... hacky
-                        file_entry.offset.input = format!(
-                            "{}",
-                            offset - mouse_delta.y.signum() * span * 0.001 * acceleration
-                        );
-                    }
+                let mut allow_drag = false;
+                if i.modifiers.shift {
+                    self.queue_event(Box::new(crate::event::TransformPlot::new_scale_y(
+                        acc,
+                        i.pointer.delta().y as f64,
+                    )))
+                } else if i.modifiers.ctrl {
+                    self.queue_event(Box::new(crate::event::TransformPlot::new_shift_y(
+                        acc,
+                        i.pointer.delta().y as f64,
+                        self.plot_dims.yspan() as f64,
+                    )))
+                } else if i.modifiers.alt {
+                    self.queue_event(Box::new(crate::event::TransformPlot::new_shift_x(
+                        acc,
+                        i.pointer.delta().x as f64,
+                        self.plot_dims.xspan() as f64,
+                    )))
+                } else {
+                    allow_drag = true;
                 }
-            }
-            // offset active plots along x
-            if g_down && mouse_delta.x != 0.0 {
-                for file_entry in self.folders.iter_mut().flat_map(|folder| &mut folder.files) {
-                    if file_entry.is_active() {
-                        continue;
-                    }
-                    if let Some(xoffset) = file_entry.xoffset.parse() {
-                        let acceleration = self.acceleration.unwrap_or(1.0) as f32;
-                        let xoffset = xoffset as f32;
-                        let span = self.plot_dims.xspan();
-                        // we just modify the string ... hacky
-                        file_entry.xoffset.input = format!(
-                            "{}",
-                            xoffset + mouse_delta.x.signum() * span * 0.001 * acceleration
-                        );
-                    }
-                }
-            }
+                allow_drag
+            });
+
             egui_plot::Plot::new(1)
                 .min_size(egui::Vec2 { x: 640.0, y: 480.0 })
-                .allow_drag(!(f_down || d_down || g_down))
+                .allow_drag(allow_drag)
+                .allow_zoom(allow_drag)
                 .show(ui, |plot_ui| {
                     // update plot dimensions in App state
                     let [x0, y0] = plot_ui.plot_bounds().min();

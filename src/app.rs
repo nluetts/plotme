@@ -25,6 +25,8 @@ pub struct App {
     copied_csvoptions: Option<CSVFile>,
     #[serde(skip)]
     pub queued_events: Vec<Box<dyn AppEvent>>,
+    #[serde(skip)]
+    commit: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -150,8 +152,10 @@ fn file_settings_menu(
 
 impl App {
     pub fn with_search_phrase(phrase: &str) -> Self {
+        let sha = env!("GIT_HASH");
         App {
             search_phrase: String::from(phrase),
+            commit: sha.to_owned(),
             ..Default::default()
         }
     }
@@ -302,6 +306,10 @@ impl App {
                     self.errors.push(msg);
                 };
             }
+            menu_button(ui, "?", |ui| {
+                ui.label("PlotMe commit SHA:");
+                ui.label(&self.commit);
+            });
         })
     }
 

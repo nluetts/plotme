@@ -1,5 +1,6 @@
 use std::{
     fs,
+    iter::repeat,
     path::{Path, PathBuf},
 };
 
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Default)]
 pub struct App {
     pub folders: Vec<Folder>,
-    search_phrase: String,
+    pub search_phrase: String,
     //FIXME: plot dimensions are not loaded when restoring session
     pub plot_dims: PlotDimensions,
     id_counter: usize,
@@ -27,6 +28,8 @@ pub struct App {
     pub queued_events: Vec<Box<dyn AppEvent>>,
     #[serde(skip)]
     commit: String,
+    #[serde(skip)]
+    pub groups: (bool, Vec<Group>),
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -40,6 +43,27 @@ impl FloatInput {
     }
 }
 
+#[derive(Default)]
+pub struct Group {
+    pub name: String,
+    entries: Vec<FileEntry>,
+}
+
+impl Group {
+    pub fn with_name(name: String) -> Self {
+        Self {
+            name,
+            entries: Vec::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct Location {
+    col: usize,
+    row: usize,
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // handle all events #TODO: system currently unused
@@ -48,7 +72,7 @@ impl eframe::App for App {
             event.run(self);
         }
 
-        egui::panel::TopBottomPanel::top("Menu").show(ctx, |ui| self.menu(ui));
+        egui::panel::TopBottomPanel::top("Menu").show(ctx, |ui| self.menu(ui, ctx));
         egui::panel::TopBottomPanel::bottom("Error Log")
             .exact_height(100.0)
             .show(ctx, |ui| {
@@ -156,6 +180,13 @@ impl App {
         App {
             search_phrase: String::from(phrase),
             commit: sha.to_owned(),
+            groups: (
+                false,
+                vec![
+                    Group::with_name("all".to_string()),
+                    Group::with_name("1".to_string()),
+                ],
+            ),
             ..Default::default()
         }
     }
@@ -181,7 +212,7 @@ impl App {
                     folder.expanded = !folder.expanded;
                 }
             });
-            folder.list_files_ui(ui, &self.search_phrase, &mut self.errors);
+            folder.list_files_ui(ui, self);
         }
     }
 
@@ -239,8 +270,17 @@ impl App {
         }
     }
 
-    fn menu(&mut self, ui: &mut egui::Ui) -> egui::InnerResponse<()> {
+    fn menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) -> egui::InnerResponse<()> {
         egui::menu::bar(ui, |ui| {
+            if ui.button("Groups").clicked() {
+                self.groups.0 = !self.groups.0
+            }
+            if self.groups.0 == true {
+                egui::Window::new("Groups")
+                    .collapsible(false)
+                    .resizable(true)
+                    .show(ctx, |ui| self.groups_menu(ui));
+            };
             menu_button(ui, "Folder", |ui| {
                 egui::ScrollArea::vertical()
                     .max_height(f32::INFINITY)
@@ -311,6 +351,76 @@ impl App {
                 ui.label(&self.commit);
             });
         })
+    }
+
+    fn groups_menu(&mut self, ui: &mut egui::Ui) {
+        ui.label("This is a simple example of drag-and-drop in egui.");
+        ui.label("Drag items between columns.");
+
+        // If there is a drop, store the location of the item being dragged, and the destination for the drop.
+        let mut from = None;
+        let mut to = None;
+
+        ui.columns(2, |uis| {
+            for (group_idx, group) in self.groups.1.iter_mut().enumerate() {
+                let ui = &mut uis[group_idx];
+
+                let frame = egui::Frame::default().inner_margin(4.0);
+
+                let (_, dropped_payload) = ui.dnd_drop_zone::<Location, ()>(frame, |ui| {
+                    ui.set_min_size(egui::vec2(64.0, 100.0));
+                    for (entry_idx, entry) in group.entries.iter().enumerate() {
+                        let item_id =
+                            egui::Id::new(("my_drag_and_drop_demo", group_idx, entry_idx));
+                        let item_location = Location {
+                            col: group_idx,
+                            row: entry_idx,
+                        };
+                        let response = ui
+                            .dnd_drag_source(item_id, item_location, |ui| {
+                                ui.label(entry.filename.to_string());
+                            })
+                            .response;
+
+                        // Detect drops onto this item:
+                        if let (Some(hovered_payload), Some(dragged_payload)) = (
+                            response.dnd_hover_payload::<Location>(),
+                            response.dnd_release_payload(),
+                        ) {
+                            // The user dropped onto this item.
+                            from = Some(dragged_payload);
+                            to = Some(Location {
+                                col: group_idx,
+                                row: entry_idx + 1,
+                            });
+                        }
+                    }
+                });
+
+                if let Some(dragged_payload) = dropped_payload {
+                    // The user dropped onto the column, but not on any one item.
+                    from = Some(dragged_payload);
+                    to = Some(Location {
+                        col: group_idx,
+                        row: usize::MAX, // Inset last
+                    });
+                }
+            }
+        });
+
+        if let (Some(from), Some(mut to)) = (from, to) {
+            if from.col == to.col {
+                // Dragging within the same column.
+                // Adjust row index if we are re-ordering:
+                to.row -= (from.row < to.row) as usize;
+            }
+
+            let entry = self.groups.1[from.col].entries.remove(from.row);
+
+            to.row = to.row.min(self.groups.1.len());
+            let group = &mut self.groups.1[to.col];
+            group.entries.insert(to.row, entry);
+        }
     }
 
     fn file_tree_ui(&mut self, ui: &mut egui::Ui) {

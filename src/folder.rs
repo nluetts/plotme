@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use egui::Widget;
+use egui::{TextBuffer, Widget};
 use serde::{Deserialize, Serialize};
 
 use crate::file_entry::FileEntry;
@@ -77,14 +77,9 @@ impl Folder {
         self.files.sort_by(|a, b| a.filename.cmp(&b.filename));
     }
 
-    pub fn list_files_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        search_phrase: &str,
-        error_log: &mut Vec<String>,
-    ) {
+    pub fn list_files_ui(&mut self, ui: &mut egui::Ui, app: &mut crate::App) {
         for file_entry in self.files.iter_mut() {
-            if !file_entry.should_be_listed(search_phrase, self.expanded) {
+            if !file_entry.should_be_listed(app.search_phrase.as_str(), self.expanded) {
                 continue;
             }
 
@@ -96,8 +91,16 @@ impl Folder {
                     ui.label(&file_entry.preview);
                 });
 
+            if file_label.hovered() {
+                ui.menu_button("test", |ui| {
+                    for grp in app.groups.1.iter() {
+                        ui.label(grp.name.as_str());
+                    }
+                });
+            }
+
             if file_label.clicked() {
-                file_entry.toggle_plotted(&self.path, error_log);
+                file_entry.toggle_plotted(&self.path, &mut app.errors);
             };
 
             // toggle plotted or active

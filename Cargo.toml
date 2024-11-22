@@ -12,9 +12,3 @@ plotters = "0.3.6"
 rfd = "0.13"
 serde = "1.0.209"
 serde_json = "1.0.127"
-
-[build]
-rustflags = ["-Z", "threads=8", "-C", "link-arg=-fuse-ld=mold"]
-
-[profile.release]
-debug = false

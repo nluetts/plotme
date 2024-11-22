@@ -20,7 +20,7 @@ impl Folder {
             for entry in read_dir.into_iter().flatten() {
                 // only list csv files
                 let filename = entry.file_name().to_string_lossy().into_owned();
-                files.push(FileEntry::new(filename, id_counter, entry));
+                files.push(FileEntry::new(filename, path.clone(), id_counter, entry));
                 *id_counter += 1;
             }
         }
@@ -69,7 +69,12 @@ impl Folder {
                     continue 'outer;
                 }
             }
-            new_files.push(FileEntry::new(filename, id_counter, entry));
+            new_files.push(FileEntry::new(
+                filename,
+                self.path.clone(),
+                id_counter,
+                entry,
+            ));
             *id_counter += 1;
         }
         self.files.append(&mut new_files);

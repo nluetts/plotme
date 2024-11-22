@@ -1,8 +1,5 @@
 use egui::Widget;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashSet, fs, path::PathBuf};
 
 use crate::{
     csvfile::CSVFile, errors::ErrorStringExt, event::AppEvent, file_entry::FileEntry,
@@ -14,6 +11,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Default)]
 pub struct App {
     pub folders: Vec<Folder>,
+    pub groups: (bool, Vec<Group>),
     pub search_phrase: String,
     //FIXME: plot dimensions are not loaded when restoring session
     pub plot_dims: PlotDimensions,
@@ -28,8 +26,6 @@ pub struct App {
     pub queued_events: Vec<Box<dyn AppEvent>>,
     #[serde(skip)]
     commit: String,
-    #[serde(skip)]
-    pub groups: (bool, Vec<Group>),
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -43,25 +39,26 @@ impl FloatInput {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+struct FileIndex {
+    folder_index: usize,
+    file_index: usize,
+}
+
+#[derive(Default, Serialize, Deserialize)]
 pub struct Group {
     pub name: String,
-    entries: Vec<FileEntry>,
+    /// contains index of folder and file
+    entries: HashSet<FileIndex>,
 }
 
 impl Group {
     pub fn with_name(name: String) -> Self {
         Self {
             name,
-            entries: Vec::new(),
+            entries: HashSet::new(),
         }
     }
-}
-
-#[derive(Default)]
-struct Location {
-    col: usize,
-    row: usize,
 }
 
 impl eframe::App for App {
@@ -92,7 +89,6 @@ impl eframe::App for App {
 fn file_settings_menu(
     ui: &mut egui::Ui,
     file_entry: &mut FileEntry,
-    folder_path: &Path,
     csv_options: &mut Option<CSVFile>,
     error_log: &mut Vec<String>,
 ) {
@@ -162,7 +158,7 @@ fn file_settings_menu(
     ui.text_edit_singleline(&mut file_entry.xoffset.input);
 
     if ui.button("Reload CSV").clicked() {
-        return file_entry.reload_csv(folder_path, error_log);
+        return file_entry.reload_csv(error_log);
     }
 
     ui.menu_button("Color", |ui| {
@@ -219,38 +215,39 @@ impl App {
 
     pub fn list_files_ui(&mut self, ui: &mut egui::Ui, folder_index: usize) {
         let folder = &mut self.folders[folder_index];
-        for file_entry in folder.files.iter_mut() {
+        for (file_index, file_entry) in folder.files.iter_mut().enumerate() {
             if !file_entry.should_be_listed(self.search_phrase.as_str(), folder.expanded) {
                 continue;
             }
 
-            let file_label = file_entry
-                .get_file_label()
-                .truncate()
-                .ui(ui)
-                .on_hover_ui(|ui| {
-                    ui.label(&file_entry.preview);
-                });
+            //TODO: provide file preview
+            // let file_label = file_entry.get_file_label().truncate().ui(ui);
+            // //     .on_hover_ui(|ui| {
+            // //         ui.label(&file_entry.preview);
+            // //     });
 
-            if file_label.hovered() {
-                ui.menu_button("test", |ui| {
-                    for grp in self.groups.1.iter() {
-                        ui.label(grp.name.as_str());
+            ui.button(file_entry.get_file_label_text())
+                .context_menu(|ui| {
+                    ui.heading("Add to group:");
+                    for grp in self.groups.1.iter_mut() {
+                        if ui.button(&grp.name).clicked() {
+                            grp.entries.insert(FileIndex {
+                                folder_index,
+                                file_index,
+                            });
+                        };
                     }
                 });
-            }
-
-            if file_label.clicked() {
-                file_entry.toggle_plotted(&folder.path, &mut self.errors);
-            };
-
-            // toggle plotted or active
-            if file_label.secondary_clicked() {
-                file_entry.toggle_active()
-            }
         }
     }
     fn delete_folders(&mut self) {
+        for current_index in 0..self.folders.len() {
+            if self.folders[current_index].to_be_deleted {
+                for grp in self.groups.1.iter_mut() {
+                    grp.entries.retain(|f| f.folder_index != current_index);
+                }
+            }
+        }
         self.folders = self
             .folders
             .iter()
@@ -306,18 +303,13 @@ impl App {
 
     fn menu_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) -> egui::InnerResponse<()> {
         egui::menu::bar(ui, |ui| {
-            if ui.button("Groups").clicked() {
-                self.groups.0 = !self.groups.0
-            }
-            if self.groups.0 == true {
-                egui::Window::new("Groups")
-                    .collapsible(false)
-                    .resizable(true)
-                    .show(ctx, |ui| self.groups_menu_ui(ui));
-            };
-
             // Folder handeling
             menu_button(ui, "Folder", |ui| {
+                if ui.button("Open Folder").clicked() {
+                    for folder in rfd::FileDialog::new().pick_folders().unwrap_or_default() {
+                        self.folders.push(Folder::new(folder, &mut self.id_counter));
+                    }
+                }
                 egui::ScrollArea::vertical()
                     .max_height(f32::INFINITY)
                     .min_scrolled_height(800.0)
@@ -364,7 +356,6 @@ impl App {
                             file_settings_menu(
                                 ui,
                                 file_entry,
-                                &folder.path,
                                 &mut self.copied_csvoptions,
                                 &mut self.errors,
                             )
@@ -383,6 +374,28 @@ impl App {
                     self.errors.push(msg);
                 };
             }
+            ui.separator();
+
+            // group handling
+            if ui.button("Groups").clicked() {
+                self.groups.0 = !self.groups.0
+            }
+            if self.groups.0 == true {
+                egui::Window::new("Groups")
+                    .collapsible(false)
+                    .resizable(true)
+                    .show(ctx, |ui| self.groups_menu_ui(ui));
+            };
+
+            for grp in self.groups.1.iter() {
+                if ui.label(&grp.name).clicked() {
+                    for index in grp.entries.iter() {
+                        let file = &mut self.folders[index.folder_index].files[index.file_index];
+                        file.toggle_plotted(&mut self.errors);
+                    }
+                };
+            }
+            ui.separator();
             menu_button(ui, "?", |ui| {
                 ui.label("PlotMe commit SHA:");
                 ui.label(&self.commit);
@@ -391,82 +404,30 @@ impl App {
     }
 
     fn groups_menu_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label("This is a simple example of drag-and-drop in egui.");
-        ui.label("Drag items between columns.");
-
-        // If there is a drop, store the location of the item being dragged, and the destination for the drop.
-        let mut from = None;
-        let mut to = None;
-
-        ui.columns(2, |uis| {
-            for (group_idx, group) in self.groups.1.iter_mut().enumerate() {
-                let ui = &mut uis[group_idx];
-
-                let frame = egui::Frame::default().inner_margin(4.0);
-
-                let (_, dropped_payload) = ui.dnd_drop_zone::<Location, ()>(frame, |ui| {
-                    ui.set_min_size(egui::vec2(64.0, 100.0));
-                    for (entry_idx, entry) in group.entries.iter().enumerate() {
-                        let item_id =
-                            egui::Id::new(("my_drag_and_drop_demo", group_idx, entry_idx));
-                        let item_location = Location {
-                            col: group_idx,
-                            row: entry_idx,
-                        };
-                        let response = ui
-                            .dnd_drag_source(item_id, item_location, |ui| {
-                                ui.label(entry.filename.to_string());
-                            })
-                            .response;
-
-                        // Detect drops onto this item:
-                        if let (Some(_), Some(dragged_payload)) = (
-                            response.dnd_hover_payload::<Location>(),
-                            response.dnd_release_payload(),
-                        ) {
-                            // The user dropped onto this item.
-                            from = Some(dragged_payload);
-                            to = Some(Location {
-                                col: group_idx,
-                                row: entry_idx + 1,
-                            });
-                        }
-                    }
-                });
-
-                if let Some(dragged_payload) = dropped_payload {
-                    // The user dropped onto the column, but not on any one item.
-                    from = Some(dragged_payload);
-                    to = Some(Location {
-                        col: group_idx,
-                        row: usize::MAX, // Inset last
-                    });
-                }
+        for (i, grp) in self.groups.1.iter_mut().enumerate() {
+            let label = format!("Group {i}");
+            ui.label(&label);
+            ui.text_edit_singleline(&mut grp.name);
+            for index in grp.entries.iter() {
+                let file = &mut self.folders[index.folder_index].files[index.file_index];
+                let file_label = file.get_file_label().truncate().ui(ui);
+                if file_label.clicked() {
+                    file.toggle_plotted(&mut self.errors);
+                };
+                if file_label.secondary_clicked() {
+                    file.toggle_active();
+                };
             }
-        });
-
-        if let (Some(from), Some(mut to)) = (from, to) {
-            if from.col == to.col {
-                // Dragging within the same column.
-                // Adjust row index if we are re-ordering:
-                to.row -= (from.row < to.row) as usize;
-            }
-
-            let entry = self.groups.1[from.col].entries.remove(from.row);
-
-            to.row = to.row.min(self.groups.1.len());
-            let group = &mut self.groups.1[to.col];
-            group.entries.insert(to.row, entry);
+        }
+        if ui.button("New Group").clicked() {
+            self.groups.1.push(Group {
+                name: "New Group".to_string(),
+                entries: HashSet::new(),
+            })
         }
     }
 
     fn file_tree_ui(&mut self, ui: &mut egui::Ui) {
-        if ui.button("Open Folder").clicked() {
-            for folder in rfd::FileDialog::new().pick_folders().unwrap_or_default() {
-                self.folders.push(Folder::new(folder, &mut self.id_counter));
-            }
-        }
-
         if self.folders.is_empty() {
             ui.label("Opened folders will appear here ...");
             return;

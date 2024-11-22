@@ -1,5 +1,4 @@
-use std::iter::Iterator;
-use std::path::Path;
+use std::{iter::Iterator, path::PathBuf};
 
 use egui::Color32;
 use serde::{Deserialize, Serialize};
@@ -17,6 +16,7 @@ pub struct FileEntry {
     pub(crate) state: FileEntryState,
     pub id: usize,
     pub preview: String,
+    pub parent: PathBuf,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -31,7 +31,12 @@ pub enum FileEntryState {
 impl FileEntryState {}
 
 impl FileEntry {
-    pub fn new(filename: String, id_counter: &mut usize, entry: std::fs::DirEntry) -> Self {
+    pub fn new(
+        filename: String,
+        parent: PathBuf,
+        id_counter: &mut usize,
+        entry: std::fs::DirEntry,
+    ) -> Self {
         let data_file = CSVFile {
             filepath: filename.clone().into(),
             ..Default::default()
@@ -52,6 +57,7 @@ impl FileEntry {
             color: egui::Color32::TRANSPARENT,
             id: *id_counter,
             preview: utils::read_first_lines(&entry.path(), 20).unwrap_or_default(),
+            parent,
         }
     }
     pub fn get_file_label_text(&mut self) -> egui::RichText {
@@ -69,8 +75,8 @@ impl FileEntry {
     pub fn get_file_label(&mut self) -> egui::Label {
         egui::Label::new(self.get_file_label_text())
     }
-    pub fn reload_csv(&mut self, folder_path: &Path, error_log: &mut Vec<String>) {
-        let filepath = { folder_path.join(self.filename.clone()) };
+    pub fn reload_csv(&mut self, error_log: &mut Vec<String>) {
+        let filepath = { self.parent.join(self.filename.clone()) };
         if let Some(csvfile) = CSVFile::new(
             filepath,
             self.data_file.xcol,
@@ -119,9 +125,9 @@ impl FileEntry {
 
 // transitions
 impl FileEntry {
-    pub fn toggle_plotted(&mut self, path: &Path, error_log: &mut Vec<String>) {
+    pub fn toggle_plotted(&mut self, error_log: &mut Vec<String>) {
         if self.data_file.data.is_empty() && self.state != FileEntryState::NeedsConfig {
-            let filepath = { path.join(self.filename.clone()) };
+            let filepath = { self.parent.join(self.filename.clone()) };
             if let Some(csvfile) = CSVFile::new(
                 filepath,
                 self.data_file.xcol,
@@ -144,7 +150,7 @@ impl FileEntry {
                     FileEntryState::PreviouslyPlotted
                 }
                 FileEntryState::Idle | FileEntryState::PreviouslyPlotted => {
-                    self.reload_csv(path, error_log);
+                    self.reload_csv(error_log);
                     FileEntryState::Plotted
                 }
                 FileEntryState::NeedsConfig => FileEntryState::Idle,

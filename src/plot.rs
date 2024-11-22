@@ -66,7 +66,7 @@ impl App {
                 allow_drag
             });
 
-            egui_plot::Plot::new(1)
+            let _respone = egui_plot::Plot::new(1)
                 .min_size(egui::Vec2 { x: 640.0, y: 480.0 })
                 .allow_drag(allow_drag)
                 .allow_zoom(allow_drag)

@@ -1,6 +1,6 @@
+use egui::Widget;
 use std::{
     fs,
-    iter::repeat,
     path::{Path, PathBuf},
 };
 
@@ -72,7 +72,7 @@ impl eframe::App for App {
             event.run(self);
         }
 
-        egui::panel::TopBottomPanel::top("Menu").show(ctx, |ui| self.menu(ui, ctx));
+        egui::panel::TopBottomPanel::top("Menu").show(ctx, |ui| self.menu_ui(ui, ctx));
         egui::panel::TopBottomPanel::bottom("Error Log")
             .exact_height(100.0)
             .show(ctx, |ui| {
@@ -190,9 +190,10 @@ impl App {
             ..Default::default()
         }
     }
-    fn list_folders(&mut self, ui: &mut egui::Ui) {
-        for folder in self.folders.iter_mut() {
+    fn list_folders_ui(&mut self, ui: &mut egui::Ui) {
+        for i in 0..self.folders.len() {
             ui.horizontal(|ui| {
+                let folder = &mut self.folders[i];
                 if ui.small_button("🗙").clicked() {
                     folder.to_be_deleted = true;
                 }
@@ -212,10 +213,43 @@ impl App {
                     folder.expanded = !folder.expanded;
                 }
             });
-            folder.list_files_ui(ui, self);
+            self.list_files_ui(ui, i);
         }
     }
 
+    pub fn list_files_ui(&mut self, ui: &mut egui::Ui, folder_index: usize) {
+        let folder = &mut self.folders[folder_index];
+        for file_entry in folder.files.iter_mut() {
+            if !file_entry.should_be_listed(self.search_phrase.as_str(), folder.expanded) {
+                continue;
+            }
+
+            let file_label = file_entry
+                .get_file_label()
+                .truncate()
+                .ui(ui)
+                .on_hover_ui(|ui| {
+                    ui.label(&file_entry.preview);
+                });
+
+            if file_label.hovered() {
+                ui.menu_button("test", |ui| {
+                    for grp in self.groups.1.iter() {
+                        ui.label(grp.name.as_str());
+                    }
+                });
+            }
+
+            if file_label.clicked() {
+                file_entry.toggle_plotted(&folder.path, &mut self.errors);
+            };
+
+            // toggle plotted or active
+            if file_label.secondary_clicked() {
+                file_entry.toggle_active()
+            }
+        }
+    }
     fn delete_folders(&mut self) {
         self.folders = self
             .folders
@@ -270,7 +304,7 @@ impl App {
         }
     }
 
-    fn menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) -> egui::InnerResponse<()> {
+    fn menu_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) -> egui::InnerResponse<()> {
         egui::menu::bar(ui, |ui| {
             if ui.button("Groups").clicked() {
                 self.groups.0 = !self.groups.0
@@ -279,14 +313,17 @@ impl App {
                 egui::Window::new("Groups")
                     .collapsible(false)
                     .resizable(true)
-                    .show(ctx, |ui| self.groups_menu(ui));
+                    .show(ctx, |ui| self.groups_menu_ui(ui));
             };
+
+            // Folder handeling
             menu_button(ui, "Folder", |ui| {
                 egui::ScrollArea::vertical()
                     .max_height(f32::INFINITY)
                     .min_scrolled_height(800.0)
                     .show(ui, |ui| self.file_tree_ui(ui));
             });
+
             menu_button(ui, "Session", |ui| {
                 if ui.button("Save Session").clicked() {
                     self.save_state(None)
@@ -353,7 +390,7 @@ impl App {
         })
     }
 
-    fn groups_menu(&mut self, ui: &mut egui::Ui) {
+    fn groups_menu_ui(&mut self, ui: &mut egui::Ui) {
         ui.label("This is a simple example of drag-and-drop in egui.");
         ui.label("Drag items between columns.");
 
@@ -383,7 +420,7 @@ impl App {
                             .response;
 
                         // Detect drops onto this item:
-                        if let (Some(hovered_payload), Some(dragged_payload)) = (
+                        if let (Some(_), Some(dragged_payload)) = (
                             response.dnd_hover_payload::<Location>(),
                             response.dnd_release_payload(),
                         ) {
@@ -446,7 +483,7 @@ impl App {
                 file_entry.search_phrase_changed()
             }
         }
-        self.list_folders(ui);
+        self.list_folders_ui(ui);
         // delete folders that were marked to be deleted
         self.delete_folders();
     }

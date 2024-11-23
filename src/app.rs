@@ -2,8 +2,12 @@ use egui::Widget;
 use std::{collections::HashSet, fs, path::PathBuf};
 
 use crate::{
-    csvfile::CSVFile, errors::ErrorStringExt, event::AppEvent, file_entry::FileEntry,
-    folder::Folder, plot::PlotDimensions,
+    csvfile::CSVFile,
+    errors::ErrorStringExt,
+    event::{AppEvent, GroupEvent},
+    file_entry::FileEntry,
+    folder::Folder,
+    plot::PlotDimensions,
 };
 use egui::{menu::menu_button, Color32};
 use serde::{Deserialize, Serialize};
@@ -39,17 +43,19 @@ impl FloatInput {
     }
 }
 
-#[derive(Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-struct FileIndex {
-    folder_index: usize,
-    file_index: usize,
+#[derive(
+    Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize, Clone, Copy,
+)]
+pub struct FileIndex {
+    pub folder_index: usize,
+    pub file_index: usize,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 pub struct Group {
     pub name: String,
     /// contains index of folder and file
-    entries: HashSet<FileIndex>,
+    pub entries: HashSet<FileIndex>,
 }
 
 impl Group {
@@ -404,13 +410,27 @@ impl App {
     }
 
     fn groups_menu_ui(&mut self, ui: &mut egui::Ui) {
+        // we cannot push the events into app inside of loop,
+        // thus this little dance
+        let mut events = Vec::new();
         for (i, grp) in self.groups.1.iter_mut().enumerate() {
-            let label = format!("Group {i}");
-            ui.label(&label);
-            ui.text_edit_singleline(&mut grp.name);
+            ui.horizontal(|ui| {
+                let label = format!("Group {}", i + 1);
+                ui.label(&label);
+                ui.text_edit_singleline(&mut grp.name);
+            });
             for index in grp.entries.iter() {
                 let file = &mut self.folders[index.folder_index].files[index.file_index];
-                let file_label = file.get_file_label().truncate().ui(ui);
+                let responde = ui.horizontal(|ui| {
+                    if ui.small_button("🗙").clicked() {
+                        events.push(Box::new(GroupEvent::RemoveFromGroup {
+                            element: *index,
+                            from_group: i,
+                        }));
+                    }
+                    file.get_file_label().truncate().ui(ui)
+                });
+                let file_label = responde.inner;
                 if file_label.clicked() {
                     file.toggle_plotted(&mut self.errors);
                 };
@@ -419,6 +439,7 @@ impl App {
                 };
             }
         }
+        events.into_iter().for_each(|e| self.queue_event(e));
         if ui.button("New Group").clicked() {
             self.groups.1.push(Group {
                 name: "New Group".to_string(),

@@ -1,65 +1,62 @@
 use crate::App;
 
-// TODO: It would be nice if these methods could consume self,
-// but then the trait would need to be a subtrait of Sized which
-// does not play nice together with Serde
-pub trait AppEvent {
-    fn apply(&mut self, app: &mut App) -> Vec<String>;
-    fn run(&mut self, app: &mut App) {
+pub enum AppEvent {
+    PlotTransformEvent(PlotTransformKind),
+    GroupEvent(GroupEventKind),
+}
+
+pub trait AppEventRunner: Sized {
+    fn apply(self, app: &mut App) -> Vec<String>;
+    fn run(self, app: &mut App) {
         let errors = self.apply(app);
         app.errors.extend(errors);
     }
 }
 
-pub struct TransformPlot {
-    acceleration: f64,
-    transform: TransfromKind,
+impl AppEventRunner for AppEvent {
+    fn apply(self, app: &mut App) -> Vec<String> {
+        match self {
+            AppEvent::PlotTransformEvent(event) => event.apply(app),
+            AppEvent::GroupEvent(event) => event.apply(app),
+        }
+    }
 }
 
-enum TransfromKind {
+pub enum PlotTransformKind {
     ScaleY(f64),
     ShiftX { delta: f64, span: f64 },
     ShiftY { delta: f64, span: f64 },
 }
 
-impl TransformPlot {
-    pub fn new_scale_y(acceleration: f64, delta: f64) -> Self {
-        Self {
-            acceleration,
-            transform: TransfromKind::ScaleY(delta),
-        }
+impl PlotTransformKind {
+    pub fn new_scale_y(delta: f64) -> Self {
+        PlotTransformKind::ScaleY(delta)
     }
-    pub fn new_shift_y(acceleration: f64, delta: f64, span: f64) -> Self {
-        Self {
-            acceleration,
-            transform: TransfromKind::ShiftY { delta, span },
-        }
+    pub fn new_shift_y(delta: f64, span: f64) -> Self {
+        PlotTransformKind::ShiftY { delta, span }
     }
-    pub fn new_shift_x(acceleration: f64, delta: f64, span: f64) -> Self {
-        Self {
-            acceleration,
-            transform: TransfromKind::ShiftX { delta, span },
-        }
+    pub fn new_shift_x(delta: f64, span: f64) -> Self {
+        PlotTransformKind::ShiftX { delta, span }
     }
 }
 
-impl AppEvent for TransformPlot {
-    fn apply(&mut self, app: &mut App) -> Vec<String> {
+impl AppEventRunner for PlotTransformKind {
+    fn apply(self, app: &mut App) -> Vec<String> {
         for file_entry in app.iter_files_mut().filter(|entry| entry.is_active()) {
-            match self.transform {
-                TransfromKind::ScaleY(delta_y) => {
+            match self {
+                PlotTransformKind::ScaleY(delta) => {
                     if let Some(scale) = file_entry.scale.parse() {
                         // we just modify the string ... hacky
-                        file_entry.scale.input = format!("{}", scale - delta_y * scale * 0.01);
+                        file_entry.scale.input = format!("{}", scale - delta * scale * 0.01);
                     }
                 }
-                TransfromKind::ShiftX { delta, span } => {
+                PlotTransformKind::ShiftX { delta, span } => {
                     if let Some(xoffset) = file_entry.xoffset.parse() {
                         // we just modify the string ... hacky
                         file_entry.xoffset.input = format!("{}", xoffset + delta * span * 0.001);
                     }
                 }
-                TransfromKind::ShiftY { delta, span } => {
+                PlotTransformKind::ShiftY { delta, span } => {
                     if let Some(offset) = file_entry.offset.parse() {
                         // we just modify the string ... hacky
                         file_entry.offset.input = format!("{}", offset - delta * span * 0.001);
@@ -71,7 +68,7 @@ impl AppEvent for TransformPlot {
     }
 }
 
-pub enum GroupEvent {
+pub enum GroupEventKind {
     RemoveFromGroup {
         element: crate::app::FileIndex,
         from_group: usize,
@@ -86,16 +83,16 @@ pub enum GroupEvent {
     },
 }
 
-impl AppEvent for GroupEvent {
-    fn apply(&mut self, app: &mut App) -> Vec<String> {
+impl AppEventRunner for GroupEventKind {
+    fn apply(self, app: &mut App) -> Vec<String> {
         let mut errors = Vec::new();
         match self {
-            GroupEvent::RemoveFromGroup {
+            GroupEventKind::RemoveFromGroup {
                 element,
                 from_group,
-            } => match app.groups.1.get_mut(*from_group) {
+            } => match app.groups.1.get_mut(from_group) {
                 Some(group) => {
-                    group.entries.remove(element);
+                    group.entries.remove(&element);
                 }
                 None => {
                     errors.push(format!(
@@ -104,22 +101,24 @@ impl AppEvent for GroupEvent {
                     ));
                 }
             },
-            GroupEvent::AddToGroup { element, to_group } => match app.groups.1.get_mut(*to_group) {
-                Some(group) => {
-                    group.entries.insert(*element);
+            GroupEventKind::AddToGroup { element, to_group } => {
+                match app.groups.1.get_mut(to_group) {
+                    Some(group) => {
+                        group.entries.insert(element);
+                    }
+                    None => {
+                        errors.push(format!(
+                            "ERROR: could not add to group with index {}, group does not exist!",
+                            to_group
+                        ));
+                    }
                 }
-                None => {
-                    errors.push(format!(
-                        "ERROR: could not add to group with index {}, group does not exist!",
-                        to_group
-                    ));
-                }
-            },
-            GroupEvent::ChangeVisible { group, unhide } => match app.groups.1.get_mut(*group) {
+            }
+            GroupEventKind::ChangeVisible { group, unhide } => match app.groups.1.get_mut(group) {
                 Some(group) => {
                     for e in group.entries.iter() {
                         let file_entry = &mut app.folders[e.folder_index].files[e.file_index];
-                        if file_entry.is_plotted() ^ *unhide {
+                        if file_entry.is_plotted() ^ unhide {
                             file_entry.toggle_plotted(&mut errors);
                         }
                     }

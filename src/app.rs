@@ -1,10 +1,10 @@
 use egui::Widget;
-use std::{collections::HashSet, fs, path::PathBuf};
+use std::{cell::RefCell, collections::HashSet, fs, path::PathBuf};
 
 use crate::{
     csvfile::CSVFile,
     errors::ErrorStringExt,
-    event::{AppEvent, GroupEvent},
+    event::{AppEvent, AppEventRunner, GroupEventKind},
     file_entry::FileEntry,
     folder::Folder,
     plot::PlotDimensions,
@@ -27,7 +27,7 @@ pub struct App {
     #[serde(skip)]
     copied_csvoptions: Option<CSVFile>,
     #[serde(skip)]
-    pub queued_events: Vec<Box<dyn AppEvent>>,
+    pub queued_events: RefCell<Vec<AppEvent>>,
     #[serde(skip)]
     commit: String,
 }
@@ -70,8 +70,8 @@ impl Group {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // handle all events #TODO: system currently unused
-        let mut events = std::mem::take(&mut self.queued_events);
-        for mut event in events.drain(..) {
+        let events = std::mem::take(&mut self.queued_events);
+        for event in events.borrow_mut().drain(..) {
             event.run(self);
         }
 
@@ -386,7 +386,7 @@ impl App {
             if ui.button("Groups").clicked() {
                 self.groups.0 = !self.groups.0
             }
-            if self.groups.0 == true {
+            if self.groups.0 {
                 egui::Window::new("Groups")
                     .collapsible(false)
                     .resizable(true)
@@ -410,9 +410,6 @@ impl App {
     }
 
     fn groups_menu_ui(&mut self, ui: &mut egui::Ui) {
-        // we cannot push the events into app inside of loop,
-        // thus this little dance
-        let mut events = Vec::new();
         for (i, grp) in self.groups.1.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 let label = format!("Group {}", i + 1);
@@ -423,10 +420,12 @@ impl App {
                 let file = &mut self.folders[index.folder_index].files[index.file_index];
                 let responde = ui.horizontal(|ui| {
                     if ui.small_button("🗙").clicked() {
-                        events.push(Box::new(GroupEvent::RemoveFromGroup {
-                            element: *index,
-                            from_group: i,
-                        }));
+                        self.queued_events.borrow_mut().push(AppEvent::GroupEvent(
+                            GroupEventKind::RemoveFromGroup {
+                                element: *index,
+                                from_group: i,
+                            },
+                        ));
                     }
                     file.get_file_label().truncate().ui(ui)
                 });
@@ -439,7 +438,6 @@ impl App {
                 };
             }
         }
-        events.into_iter().for_each(|e| self.queue_event(e));
         if ui.button("New Group").clicked() {
             self.groups.1.push(Group {
                 name: "New Group".to_string(),
@@ -549,14 +547,11 @@ impl App {
         std::slice::IterMut<FileEntry>,
         impl FnMut(&'a mut Folder) -> std::slice::IterMut<FileEntry>,
     > {
-        self.folders
-            .iter_mut()
-            .flat_map(|f| f.files.iter_mut())
-            .into_iter()
+        self.folders.iter_mut().flat_map(|f| f.files.iter_mut())
     }
 
-    pub fn queue_event(&mut self, event: Box<dyn crate::event::AppEvent>) {
-        self.queued_events.push(event);
+    pub fn queue_event(&mut self, event: crate::event::AppEvent) {
+        self.queued_events.borrow_mut().push(event);
     }
 }
 

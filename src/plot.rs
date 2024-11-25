@@ -1,7 +1,10 @@
 use egui::{epaint::Hsva, Color32, Id};
 use serde::{Deserialize, Serialize};
 
-use crate::App;
+use crate::{
+    event::{AppEvent, PlotTransformKind},
+    App,
+};
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct PlotDimensions {
@@ -23,43 +26,29 @@ impl PlotDimensions {
 impl App {
     pub fn plot_panel_ui(&mut self, ctx: &egui::Context) {
         egui::panel::CentralPanel::default().show(ctx, |ui| {
-            let acc_id = Id::new("acceleration");
-            // dispatch mouse and keyboard interactions
-
-            // the current acceleration is stateful and must be kept between
-            // updates, thus we store it in the context and load it here
-            if ctx.input(|i| i.pointer.primary_released()) {
-                ctx.data_mut(|map| {
-                    map.remove_temp::<f64>(acc_id);
-                });
-            }
-            let acc = ctx.data_mut(|map| {
-                let acc = map.get_temp_mut_or_insert_with(acc_id, || 1.0);
-                *acc *= 1.01;
-                acc.to_owned()
-            });
             let allow_drag = ctx.input(|i| {
                 if !i.pointer.primary_down() {
                     return true;
                 }
                 let mut allow_drag = false;
                 if i.modifiers.shift {
-                    self.queue_event(Box::new(crate::event::TransformPlot::new_scale_y(
-                        acc,
-                        i.pointer.delta().y as f64,
-                    )))
+                    self.queue_event(AppEvent::PlotTransformEvent(
+                        PlotTransformKind::new_scale_y(i.pointer.delta().y as f64),
+                    ))
                 } else if i.modifiers.ctrl {
-                    self.queue_event(Box::new(crate::event::TransformPlot::new_shift_y(
-                        acc,
-                        i.pointer.delta().y as f64,
-                        self.plot_dims.yspan() as f64,
-                    )))
+                    self.queue_event(AppEvent::PlotTransformEvent(
+                        PlotTransformKind::new_shift_y(
+                            i.pointer.delta().y as f64,
+                            self.plot_dims.yspan() as f64,
+                        ),
+                    ))
                 } else if i.modifiers.alt {
-                    self.queue_event(Box::new(crate::event::TransformPlot::new_shift_x(
-                        acc,
-                        i.pointer.delta().x as f64,
-                        self.plot_dims.xspan() as f64,
-                    )))
+                    self.queue_event(AppEvent::PlotTransformEvent(
+                        PlotTransformKind::new_shift_x(
+                            i.pointer.delta().x as f64,
+                            self.plot_dims.xspan() as f64,
+                        ),
+                    ))
                 } else {
                     allow_drag = true;
                 }

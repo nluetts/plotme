@@ -32,18 +32,18 @@ impl App {
                 }
                 let mut allow_drag = false;
                 if i.modifiers.shift {
-                    self.queue_event(AppEvent::PlotTransformEvent(
+                    self.queued_events.push_event(AppEvent::PlotTransformEvent(
                         PlotTransformKind::new_scale_y(i.pointer.delta().y as f64),
                     ))
                 } else if i.modifiers.ctrl {
-                    self.queue_event(AppEvent::PlotTransformEvent(
+                    self.queued_events.push_event(AppEvent::PlotTransformEvent(
                         PlotTransformKind::new_shift_y(
                             i.pointer.delta().y as f64,
                             self.plot_dims.yspan() as f64,
                         ),
                     ))
                 } else if i.modifiers.alt {
-                    self.queue_event(AppEvent::PlotTransformEvent(
+                    self.queued_events.push_event(AppEvent::PlotTransformEvent(
                         PlotTransformKind::new_shift_x(
                             i.pointer.delta().x as f64,
                             self.plot_dims.xspan() as f64,

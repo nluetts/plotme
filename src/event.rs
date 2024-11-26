@@ -22,6 +22,19 @@ impl AppEventRunner for AppEvent {
     }
 }
 
+#[derive(Default)]
+pub struct EventQueue(Vec<AppEvent>);
+
+impl EventQueue {
+    pub fn push_event(&mut self, event: crate::event::AppEvent) {
+        self.0.push(event);
+    }
+    pub fn take_events(&mut self) -> Vec<AppEvent> {
+        let new = Vec::new();
+        std::mem::replace(&mut self.0, new)
+    }
+}
+
 pub enum PlotTransformKind {
     ScaleY(f64),
     ShiftX { delta: f64, span: f64 },

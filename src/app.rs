@@ -1,5 +1,5 @@
 use egui::Widget;
-use std::{cell::RefCell, collections::HashSet, fs, path::PathBuf};
+use std::{collections::HashSet, fs, path::PathBuf};
 
 use crate::{
     csvfile::CSVFile,
@@ -27,7 +27,7 @@ pub struct App {
     #[serde(skip)]
     copied_csvoptions: Option<CSVFile>,
     #[serde(skip)]
-    pub queued_events: RefCell<Vec<AppEvent>>,
+    pub queued_events: crate::event::EventQueue,
     #[serde(skip)]
     commit: String,
 }
@@ -69,9 +69,7 @@ impl Group {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // handle all events #TODO: system currently unused
-        let events = std::mem::take(&mut self.queued_events);
-        for event in events.borrow_mut().drain(..) {
+        for event in self.queued_events.take_events() {
             event.run(self);
         }
 
@@ -126,7 +124,7 @@ fn file_settings_menu(
 
     ui.horizontal(|ui| {
         if ui.button("Copy Options").clicked() {
-            let csv_tempate = CSVFile {
+            let csv_template = CSVFile {
                 delimiter: file_entry.data_file.delimiter,
                 comment_char: file_entry.data_file.comment_char,
                 xcol: file_entry.data_file.xcol,
@@ -135,7 +133,7 @@ fn file_settings_menu(
                 skip_footer: file_entry.data_file.skip_footer,
                 ..Default::default()
             };
-            *csv_options = Some(csv_tempate);
+            *csv_options = Some(csv_template);
         }
 
         match csv_options {
@@ -420,7 +418,7 @@ impl App {
                 let file = &mut self.folders[index.folder_index].files[index.file_index];
                 let responde = ui.horizontal(|ui| {
                     if ui.small_button("🗙").clicked() {
-                        self.queued_events.borrow_mut().push(AppEvent::GroupEvent(
+                        self.queued_events.push_event(AppEvent::GroupEvent(
                             GroupEventKind::RemoveFromGroup {
                                 element: *index,
                                 from_group: i,
@@ -548,10 +546,6 @@ impl App {
         impl FnMut(&'a mut Folder) -> std::slice::IterMut<FileEntry>,
     > {
         self.folders.iter_mut().flat_map(|f| f.files.iter_mut())
-    }
-
-    pub fn queue_event(&mut self, event: crate::event::AppEvent) {
-        self.queued_events.borrow_mut().push(event);
     }
 }
 
